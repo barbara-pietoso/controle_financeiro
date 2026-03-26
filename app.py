@@ -1,36 +1,149 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 from datetime import date
-from database import (
-    criar_tabelas,
-    inserir_lancamento,
-    listar_lancamentos,
-    excluir_lancamento,
-    inserir_divida,
-    listar_dividas,
-    pagar_divida,
-    excluir_divida
-)
 
 # =========================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIG
 # =========================
-st.set_page_config(
-    page_title="Controle Financeiro",
-    page_icon="💰",
-    layout="wide"
-)
+st.set_page_config(page_title="Controle Financeiro", page_icon="💰", layout="wide")
 
 # =========================
-# BANCO / TABELAS
+# BANCO DE DADOS
 # =========================
-criar_tabelas()
+DB_NAME = "financeiro.db"
+
+def conectar():
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
+
+def criar_tabelas():
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lancamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            tipo TEXT NOT NULL,
+            categoria TEXT NOT NULL,
+            descricao TEXT,
+            valor REAL NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dividas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome_pessoa TEXT NOT NULL,
+            descricao TEXT,
+            valor_total REAL NOT NULL,
+            valor_restante REAL NOT NULL,
+            data_criacao TEXT NOT NULL,
+            status TEXT NOT NULL
+        )
+    """)
+
+    conn.commit()
+    conn.close()
 
 # =========================
-# CONSTANTES
+# FUNÇÕES Lançamentos
 # =========================
+def inserir_lancamento(data, tipo, categoria, descricao, valor):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO lancamentos (data, tipo, categoria, descricao, valor)
+        VALUES (?, ?, ?, ?, ?)
+    """, (data, tipo, categoria, descricao, valor))
+    conn.commit()
+    conn.close()
+
+def listar_lancamentos():
+    conn = conectar()
+    try:
+        df = pd.read_sql_query("SELECT * FROM lancamentos ORDER BY data DESC, id DESC", conn)
+    except:
+        df = pd.DataFrame(columns=["id", "data", "tipo", "categoria", "descricao", "valor"])
+    conn.close()
+    return df
+
+def excluir_lancamento(id_lancamento):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM lancamentos WHERE id = ?", (id_lancamento,))
+    conn.commit()
+    conn.close()
+
+# =========================
+# FUNÇÕES Dívidas
+# =========================
+def inserir_divida(nome_pessoa, descricao, valor_total, data_criacao):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO dividas (nome_pessoa, descricao, valor_total, valor_restante, data_criacao, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (nome_pessoa, descricao, valor_total, valor_total, data_criacao, "Aberta"))
+    conn.commit()
+    conn.close()
+
+def listar_dividas():
+    conn = conectar()
+    try:
+        df = pd.read_sql_query("SELECT * FROM dividas ORDER BY status ASC, data_criacao DESC, id DESC", conn)
+    except:
+        df = pd.DataFrame(columns=["id", "nome_pessoa", "descricao", "valor_total", "valor_restante", "data_criacao", "status"])
+    conn.close()
+    return df
+
+def pagar_divida(id_divida, valor_pagamento, data_pagamento):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT valor_restante, nome_pessoa FROM dividas WHERE id = ?", (id_divida,))
+    resultado = cursor.fetchone()
+
+    if resultado:
+        valor_restante_atual, nome_pessoa = resultado
+        novo_valor_restante = max(valor_restante_atual - valor_pagamento, 0)
+        novo_status = "Quitada" if novo_valor_restante == 0 else "Aberta"
+
+        cursor.execute("""
+            UPDATE dividas
+            SET valor_restante = ?, status = ?
+            WHERE id = ?
+        """, (novo_valor_restante, novo_status, id_divida))
+
+        # Registra como despesa automaticamente
+        cursor.execute("""
+            INSERT INTO lancamentos (data, tipo, categoria, descricao, valor)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            data_pagamento,
+            "Despesa",
+            "Pagamento de Dívida",
+            f"Pagamento de dívida para {nome_pessoa}",
+            valor_pagamento
+        ))
+
+    conn.commit()
+    conn.close()
+
+def excluir_divida(id_divida):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM dividas WHERE id = ?", (id_divida,))
+    conn.commit()
+    conn.close()
+
+# =========================
+# UTILITÁRIOS
+# =========================
+def formatar_brl(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 CATEGORIAS_RECEITA = ["Salário", "Freela", "Show"]
-
 CATEGORIAS_DESPESA = [
     "Alimentação",
     "Transporte",
@@ -41,184 +154,95 @@ CATEGORIAS_DESPESA = [
     "Assinaturas",
     "Compras",
     "Contas Fixas",
-    "Outros"
+    "Outros",
+    "Pagamento de Dívida"
 ]
 
 # =========================
-# FUNÇÕES AUXILIARES
+# INICIALIZAÇÃO
 # =========================
-def formatar_brl(valor):
-    try:
-        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return "R$ 0,00"
-
-def preparar_lancamentos(df):
-    if df.empty:
-        return df
-
-    df = df.copy()
-    df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
-    df["data"] = pd.to_datetime(df["data"], errors="coerce")
-    df["mes"] = df["data"].dt.to_period("M").astype(str)
-    return df
-
-def preparar_dividas(df):
-    if df.empty:
-        return df
-
-    df = df.copy()
-    df["valor_total"] = pd.to_numeric(df["valor_total"], errors="coerce").fillna(0)
-    df["valor_restante"] = pd.to_numeric(df["valor_restante"], errors="coerce").fillna(0)
-    df["data_criacao"] = pd.to_datetime(df["data_criacao"], errors="coerce")
-    return df
-
-def calcular_resumo(df_lanc):
-    if df_lanc.empty:
-        return 0.0, 0.0, 0.0, 0.0
-
-    receitas = df_lanc[df_lanc["tipo"] == "Receita"]["valor"].sum()
-    despesas = df_lanc[df_lanc["tipo"] == "Despesa"]["valor"].sum()
-
-    # pagamentos de dívida são despesas com categoria "Pagamento de Dívida"
-    pag_divida = df_lanc[
-        (df_lanc["tipo"] == "Despesa") & (df_lanc["categoria"] == "Pagamento de Dívida")
-    ]["valor"].sum()
-
-    saldo = receitas - despesas
-    return receitas, despesas, saldo, pag_divida
-
-def gerar_resumo_mensal(df_lanc):
-    if df_lanc.empty:
-        return pd.DataFrame(columns=["Mês", "Entradas", "Despesas", "Pagamentos de Dívida", "Saldo"])
-
-    df = df_lanc.copy()
-
-    receitas_mensais = (
-        df[df["tipo"] == "Receita"]
-        .groupby("mes")["valor"]
-        .sum()
-        .rename("Entradas")
-    )
-
-    despesas_mensais = (
-        df[df["tipo"] == "Despesa"]
-        .groupby("mes")["valor"]
-        .sum()
-        .rename("Despesas")
-    )
-
-    dividas_mensais = (
-        df[(df["tipo"] == "Despesa") & (df["categoria"] == "Pagamento de Dívida")]
-        .groupby("mes")["valor"]
-        .sum()
-        .rename("Pagamentos de Dívida")
-    )
-
-    resumo = pd.concat([receitas_mensais, despesas_mensais, dividas_mensais], axis=1).fillna(0)
-    resumo["Saldo"] = resumo["Entradas"] - resumo["Despesas"]
-    resumo = resumo.reset_index().rename(columns={"mes": "Mês"})
-    resumo = resumo.sort_values("Mês")
-    return resumo
-
-# =========================
-# CARREGAR DADOS
-# =========================
-df_lanc = listar_lancamentos()
-df_div = listar_dividas()
-
-df_lanc = preparar_lancamentos(df_lanc)
-df_div = preparar_dividas(df_div)
-
-receitas, despesas, saldo, total_pag_dividas = calcular_resumo(df_lanc)
-total_dividas_restantes = df_div["valor_restante"].sum() if not df_div.empty else 0.0
+criar_tabelas()
 
 # =========================
 # TÍTULO
 # =========================
 st.title("💰 Controle Financeiro")
-st.caption("Entradas, despesas e dívidas em uma única página")
+st.caption("Entradas, despesas e controle de dívidas em uma única página")
 
 # =========================
-# RESUMO GERAL
+# CARREGAR DADOS
 # =========================
-st.subheader("Resumo Geral")
+df = listar_lancamentos()
+df_dividas = listar_dividas()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Entradas", formatar_brl(receitas))
-c2.metric("Despesas", formatar_brl(despesas))
-c3.metric("Saldo", formatar_brl(saldo))
-c4.metric("Dívidas Restantes", formatar_brl(total_dividas_restantes))
+if not df.empty:
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+
+if not df_dividas.empty:
+    if "valor_total" in df_dividas.columns:
+        df_dividas["valor_total"] = pd.to_numeric(df_dividas["valor_total"], errors="coerce").fillna(0)
+    if "valor_restante" in df_dividas.columns:
+        df_dividas["valor_restante"] = pd.to_numeric(df_dividas["valor_restante"], errors="coerce").fillna(0)
+
+# =========================
+# MÉTRICAS
+# =========================
+receitas = df[df["tipo"] == "Receita"]["valor"].sum() if not df.empty else 0
+despesas = df[df["tipo"] == "Despesa"]["valor"].sum() if not df.empty else 0
+saldo = receitas - despesas
+dividas_abertas = df_dividas[df_dividas["status"] == "Aberta"]["valor_restante"].sum() if not df_dividas.empty and "status" in df_dividas.columns else 0
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Entradas", formatar_brl(receitas))
+m2.metric("Despesas", formatar_brl(despesas))
+m3.metric("Saldo Atual", formatar_brl(saldo))
+m4.metric("Dívidas em Aberto", formatar_brl(dividas_abertas))
 
 st.divider()
 
 # =========================
-# CADASTRO DE LANÇAMENTOS
+# FORMULÁRIOS
 # =========================
-st.subheader("➕ Novo Lançamento")
+col_esq, col_dir = st.columns([1, 1])
 
-col_a, col_b = st.columns(2)
+# ---------- NOVO LANÇAMENTO ----------
+with col_esq:
+    st.subheader("➕ Novo Lançamento")
 
-with col_a:
-    data_lanc = st.date_input("Data do lançamento", value=date.today(), key="data_lanc")
-    tipo_lanc = st.selectbox("Tipo", ["Receita", "Despesa"], key="tipo_lanc")
+    data_lanc = st.date_input("Data", value=date.today(), key="data_lanc")
+    tipo = st.selectbox("Tipo", ["Receita", "Despesa"], key="tipo_lanc")
 
-if tipo_lanc == "Receita":
-    opcoes_categoria = CATEGORIAS_RECEITA
-else:
-    opcoes_categoria = CATEGORIAS_DESPESA
+    categorias = CATEGORIAS_RECEITA if tipo == "Receita" else CATEGORIAS_DESPESA
+    categoria = st.selectbox("Categoria", categorias, key="categoria_lanc")
 
-with col_b:
-    categoria_lanc = st.selectbox("Categoria", opcoes_categoria, key="categoria_lanc")
+    descricao = st.text_input("Descrição", key="descricao_lanc")
+    valor = st.number_input("Valor (R$)", min_value=0.0, format="%.2f", key="valor_lanc")
 
-descricao_lanc = st.text_input("Descrição", key="descricao_lanc")
-valor_lanc = st.number_input("Valor (R$)", min_value=0.0, format="%.2f", key="valor_lanc")
+    if st.button("Salvar Lançamento", use_container_width=True):
+        if valor > 0:
+            inserir_lancamento(str(data_lanc), tipo, categoria, descricao, valor)
+            st.success("Lançamento salvo com sucesso!")
+            st.rerun()
+        else:
+            st.warning("Informe um valor maior que zero.")
 
-if st.button("Salvar lançamento", use_container_width=True):
-    if valor_lanc <= 0:
-        st.warning("Informe um valor maior que zero.")
-    else:
-        inserir_lancamento(
-            str(data_lanc),
-            tipo_lanc,
-            categoria_lanc,
-            descricao_lanc,
-            valor_lanc
-        )
-        st.success("Lançamento salvo com sucesso.")
-        st.rerun()
+# ---------- NOVA DÍVIDA ----------
+with col_dir:
+    st.subheader("🤝 Nova Dívida")
 
-st.divider()
-
-# =========================
-# CADASTRO DE DÍVIDAS
-# =========================
-st.subheader("🤝 Cadastrar Dívida")
-
-col_d1, col_d2 = st.columns(2)
-
-with col_d1:
-    nome_pessoa = st.text_input("Pessoa para quem você deve", key="nome_pessoa")
+    nome_pessoa = st.text_input("Pessoa para quem você deve", key="nome_divida")
+    desc_divida = st.text_input("Descrição da dívida", key="desc_divida")
+    valor_divida = st.number_input("Valor total da dívida (R$)", min_value=0.0, format="%.2f", key="valor_divida")
     data_divida = st.date_input("Data da dívida", value=date.today(), key="data_divida")
 
-with col_d2:
-    descricao_divida = st.text_input("Descrição da dívida", key="descricao_divida")
-    valor_divida = st.number_input("Valor total da dívida (R$)", min_value=0.0, format="%.2f", key="valor_divida")
-
-if st.button("Cadastrar dívida", use_container_width=True):
-    if not nome_pessoa.strip():
-        st.warning("Informe o nome da pessoa.")
-    elif valor_divida <= 0:
-        st.warning("Informe um valor maior que zero.")
-    else:
-        inserir_divida(
-            nome_pessoa.strip(),
-            str(data_divida),
-            descricao_divida.strip(),
-            valor_divida
-        )
-        st.success("Dívida cadastrada com sucesso.")
-        st.rerun()
+    if st.button("Salvar Dívida", use_container_width=True):
+        if nome_pessoa.strip() and valor_divida > 0:
+            inserir_divida(nome_pessoa.strip(), desc_divida, valor_divida, str(data_divida))
+            st.success("Dívida cadastrada com sucesso!")
+            st.rerun()
+        else:
+            st.warning("Preencha o nome da pessoa e um valor maior que zero.")
 
 st.divider()
 
@@ -227,201 +251,144 @@ st.divider()
 # =========================
 st.subheader("💸 Pagar Dívida")
 
-dividas_abertas = pd.DataFrame()
-if not df_div.empty:
-    dividas_abertas = df_div[df_div["valor_restante"] > 0].copy()
+dividas_abertas_df = pd.DataFrame()
+if not df_dividas.empty and "status" in df_dividas.columns:
+    dividas_abertas_df = df_dividas[df_dividas["status"] == "Aberta"].copy()
 
-if dividas_abertas.empty:
-    st.info("Não há dívidas em aberto no momento.")
-else:
-    opcoes_dividas = {
-        f'ID {row["id"]} - {row["nome_pessoa"]} | Restante: {formatar_brl(row["valor_restante"])}': row["id"]
-        for _, row in dividas_abertas.iterrows()
-    }
+if not dividas_abertas_df.empty:
+    opcoes_dividas = {}
+    for _, row in dividas_abertas_df.iterrows():
+        nome = row["nome_pessoa"] if "nome_pessoa" in row.index else "Sem nome"
+        restante = row["valor_restante"] if "valor_restante" in row.index else 0
+        opcoes_dividas[f'ID {row["id"]} - {nome} | Restante: {formatar_brl(restante)}'] = row["id"]
 
-    col_p1, col_p2, col_p3 = st.columns(3)
+    col1, col2, col3 = st.columns([2, 1, 1])
 
-    with col_p1:
-        divida_selecionada_label = st.selectbox(
-            "Selecione a dívida",
-            list(opcoes_dividas.keys()),
-            key="divida_selecionada"
-        )
-        id_divida = opcoes_dividas[divida_selecionada_label]
-
-    with col_p2:
+    with col1:
+        divida_selecionada = st.selectbox("Selecione a dívida", list(opcoes_dividas.keys()))
+    with col2:
+        valor_pagamento = st.number_input("Valor do pagamento", min_value=0.0, format="%.2f", key="valor_pagamento")
+    with col3:
         data_pagamento = st.date_input("Data do pagamento", value=date.today(), key="data_pagamento")
 
-    with col_p3:
-        valor_pagamento = st.number_input("Valor pago (R$)", min_value=0.0, format="%.2f", key="valor_pagamento")
-
-    observacao_pagamento = st.text_input(
-        "Observação do pagamento (opcional)",
-        key="obs_pagamento"
-    )
-
-    if st.button("Registrar pagamento da dívida", use_container_width=True):
-        if valor_pagamento <= 0:
-            st.warning("Informe um valor maior que zero.")
+    if st.button("Registrar Pagamento", use_container_width=True):
+        id_divida = opcoes_dividas[divida_selecionada]
+        if valor_pagamento > 0:
+            pagar_divida(id_divida, valor_pagamento, str(data_pagamento))
+            st.success("Pagamento registrado! Também entrou automaticamente como despesa.")
+            st.rerun()
         else:
-            sucesso, mensagem = pagar_divida(
-                id_divida=id_divida,
-                valor_pagamento=valor_pagamento,
-                data_pagamento=str(data_pagamento),
-                observacao=observacao_pagamento
-            )
-
-            if sucesso:
-                st.success(mensagem)
-                st.rerun()
-            else:
-                st.error(mensagem)
+            st.warning("Informe um valor maior que zero.")
+else:
+    st.info("Não há dívidas abertas no momento.")
 
 st.divider()
 
 # =========================
 # GRÁFICOS
 # =========================
-st.subheader("📊 Gráficos")
-
 g1, g2 = st.columns(2)
 
 with g1:
-    st.markdown("**Despesas por categoria**")
-    if not df_lanc.empty:
-        despesas_categoria = (
-            df_lanc[df_lanc["tipo"] == "Despesa"]
-            .groupby("categoria")["valor"]
-            .sum()
-            .sort_values(ascending=False)
-        )
-
-        if not despesas_categoria.empty:
-            st.bar_chart(despesas_categoria)
+    st.subheader("📊 Gastos por Categoria")
+    if not df.empty:
+        despesas_df = df[df["tipo"] == "Despesa"]
+        if not despesas_df.empty:
+            gastos_categoria = despesas_df.groupby("categoria")["valor"].sum().sort_values(ascending=False)
+            st.bar_chart(gastos_categoria)
         else:
-            st.info("Ainda não há despesas para exibir.")
+            st.info("Sem despesas cadastradas.")
     else:
-        st.info("Sem dados ainda.")
+        st.info("Sem lançamentos cadastrados.")
 
 with g2:
-    st.markdown("**Entradas por categoria**")
-    if not df_lanc.empty:
-        receitas_categoria = (
-            df_lanc[df_lanc["tipo"] == "Receita"]
-            .groupby("categoria")["valor"]
-            .sum()
-            .sort_values(ascending=False)
-        )
-
-        if not receitas_categoria.empty:
-            st.bar_chart(receitas_categoria)
-        else:
-            st.info("Ainda não há entradas para exibir.")
-    else:
-        st.info("Sem dados ainda.")
-
-st.markdown("**Relação mensal: entradas x despesas x pagamentos de dívida**")
-resumo_mensal = gerar_resumo_mensal(df_lanc)
-
-if not resumo_mensal.empty:
-    grafico_mensal = resumo_mensal.set_index("Mês")[["Entradas", "Despesas", "Pagamentos de Dívida"]]
-    st.line_chart(grafico_mensal)
-else:
-    st.info("Ainda não há dados suficientes para o gráfico mensal.")
+    st.subheader("📈 Entradas x Despesas")
+    resumo = pd.DataFrame({
+        "Tipo": ["Entradas", "Despesas"],
+        "Valor": [receitas, despesas]
+    }).set_index("Tipo")
+    st.bar_chart(resumo)
 
 st.divider()
 
 # =========================
-# TABELA RESUMO MENSAL
+# TABELA RESUMO GERAL
 # =========================
-st.subheader("📅 Resumo Mensal")
+st.subheader("📋 Relação Geral: Entradas, Despesas e Dívidas")
 
-if not resumo_mensal.empty:
-    resumo_mensal_exib = resumo_mensal.copy()
-    for col in ["Entradas", "Despesas", "Pagamentos de Dívida", "Saldo"]:
-        resumo_mensal_exib[col] = resumo_mensal_exib[col].apply(formatar_brl)
+resumo_geral = pd.DataFrame({
+    "Indicador": ["Total de Entradas", "Total de Despesas", "Saldo Atual", "Dívidas em Aberto"],
+    "Valor": [receitas, despesas, saldo, dividas_abertas]
+})
+resumo_geral["Valor Formatado"] = resumo_geral["Valor"].apply(formatar_brl)
 
-    st.dataframe(resumo_mensal_exib, use_container_width=True, hide_index=True)
-else:
-    st.info("Nenhum dado mensal para exibir ainda.")
+st.dataframe(
+    resumo_geral[["Indicador", "Valor Formatado"]],
+    use_container_width=True,
+    hide_index=True
+)
 
 st.divider()
 
 # =========================
 # TABELA DE LANÇAMENTOS
 # =========================
-st.subheader("📋 Lançamentos")
+st.subheader("🧾 Lançamentos")
 
-if not df_lanc.empty:
-    df_lanc_exib = df_lanc.copy()
-    df_lanc_exib["data"] = df_lanc_exib["data"].dt.strftime("%d/%m/%Y")
-    df_lanc_exib["valor_formatado"] = df_lanc_exib["valor"].apply(formatar_brl)
+if not df.empty:
+    df_exibir = df.copy()
+    df_exibir["data"] = df_exibir["data"].dt.strftime("%d/%m/%Y")
+    df_exibir["valor"] = df_exibir["valor"].apply(formatar_brl)
 
     st.dataframe(
-        df_lanc_exib[["id", "data", "tipo", "categoria", "descricao", "valor_formatado"]]
-        .rename(columns={
-            "id": "ID",
-            "data": "Data",
-            "tipo": "Tipo",
-            "categoria": "Categoria",
-            "descricao": "Descrição",
-            "valor_formatado": "Valor"
-        }),
+        df_exibir[["id", "data", "tipo", "categoria", "descricao", "valor"]],
         use_container_width=True,
         hide_index=True
     )
 
-    st.markdown("**Excluir lançamento**")
-    id_lanc_excluir = st.selectbox(
-        "Selecione o ID do lançamento para excluir",
-        df_lanc["id"].tolist(),
-        key="id_lanc_excluir"
-    )
+    ids_lanc = df["id"].tolist()
+    id_excluir_lanc = st.selectbox("Selecione o ID do lançamento para excluir", ids_lanc, key="excluir_lanc")
 
-    if st.button("Excluir lançamento selecionado", use_container_width=True):
-        excluir_lancamento(id_lanc_excluir)
-        st.success("Lançamento excluído com sucesso.")
+    if st.button("Excluir Lançamento"):
+        excluir_lancamento(id_excluir_lanc)
+        st.success("Lançamento excluído com sucesso!")
         st.rerun()
 else:
-    st.info("Nenhum lançamento cadastrado ainda.")
+    st.info("Nenhum lançamento cadastrado.")
 
 st.divider()
 
 # =========================
 # TABELA DE DÍVIDAS
 # =========================
-st.subheader("🤝 Minhas Dívidas")
+st.subheader("🤝 Dívidas")
 
-if not df_div.empty:
-    df_div_exib = df_div.copy()
-    df_div_exib["data_criacao"] = df_div_exib["data_criacao"].dt.strftime("%d/%m/%Y")
-    df_div_exib["valor_total_fmt"] = df_div_exib["valor_total"].apply(formatar_brl)
-    df_div_exib["valor_restante_fmt"] = df_div_exib["valor_restante"].apply(formatar_brl)
+if not df_dividas.empty:
+    df_dividas_exibir = df_dividas.copy()
+
+    if "data_criacao" in df_dividas_exibir.columns:
+        df_dividas_exibir["data_criacao"] = pd.to_datetime(df_dividas_exibir["data_criacao"], errors="coerce").dt.strftime("%d/%m/%Y")
+
+    if "valor_total" in df_dividas_exibir.columns:
+        df_dividas_exibir["valor_total"] = df_dividas_exibir["valor_total"].apply(formatar_brl)
+
+    if "valor_restante" in df_dividas_exibir.columns:
+        df_dividas_exibir["valor_restante"] = df_dividas_exibir["valor_restante"].apply(formatar_brl)
+
+    colunas_dividas = [c for c in ["id", "nome_pessoa", "descricao", "valor_total", "valor_restante", "data_criacao", "status"] if c in df_dividas_exibir.columns]
 
     st.dataframe(
-        df_div_exib[["id", "nome_pessoa", "data_criacao", "descricao", "valor_total_fmt", "valor_restante_fmt"]]
-        .rename(columns={
-            "id": "ID",
-            "nome_pessoa": "Pessoa",
-            "data_criacao": "Data",
-            "descricao": "Descrição",
-            "valor_total_fmt": "Valor Total",
-            "valor_restante_fmt": "Valor Restante"
-        }),
+        df_dividas_exibir[colunas_dividas],
         use_container_width=True,
         hide_index=True
     )
 
-    st.markdown("**Excluir dívida**")
-    id_div_excluir = st.selectbox(
-        "Selecione o ID da dívida para excluir",
-        df_div["id"].tolist(),
-        key="id_div_excluir"
-    )
+    ids_div = df_dividas["id"].tolist()
+    id_excluir_div = st.selectbox("Selecione o ID da dívida para excluir", ids_div, key="excluir_div")
 
-    if st.button("Excluir dívida selecionada", use_container_width=True):
-        excluir_divida(id_div_excluir)
-        st.success("Dívida excluída com sucesso.")
+    if st.button("Excluir Dívida"):
+        excluir_divida(id_excluir_div)
+        st.success("Dívida excluída com sucesso!")
         st.rerun()
 else:
-    st.info("Nenhuma dívida cadastrada ainda.")
+    st.info("Nenhuma dívida cadastrada.")
