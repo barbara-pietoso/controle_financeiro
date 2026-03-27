@@ -401,12 +401,9 @@ CATEGORIAS_DESPESA = [
 ]
 
 FORMAS_PAGAMENTO = [
-    "Débito",
-    "Crédito",
-    "Pix",
-    "Dinheiro",
-    "Boleto",
-    "Transferência"
+    "Débito/Pix BB",
+    "Crédito BB",
+    "Crédito BB Parcelado"
 ]
 
 # ==========================================
