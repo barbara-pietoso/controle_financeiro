@@ -75,7 +75,9 @@ def criar_tabelas():
             tipo TEXT NOT NULL,
             categoria TEXT NOT NULL,
             descricao TEXT,
-            valor REAL NOT NULL
+            valor REAL NOT NULL,
+            banco TEXT,
+            forma_pagamento TEXT
         )
     """)
 
@@ -91,15 +93,6 @@ def criar_tabelas():
         )
     """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cartao (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome_cartao TEXT NOT NULL,
-            limite_total REAL NOT NULL,
-            limite_usado REAL NOT NULL DEFAULT 0
-        )
-    """)
-
     conn.commit()
     conn.close()
 
@@ -110,7 +103,6 @@ def migrar_tabela_dividas_se_necessario():
     conn = conectar()
     cursor = conn.cursor()
 
-    # Verifica se existe
     cursor.execute("""
         SELECT name FROM sqlite_master
         WHERE type='table' AND name='dividas'
@@ -121,7 +113,6 @@ def migrar_tabela_dividas_se_necessario():
         conn.close()
         return
 
-    # Colunas atuais
     cursor.execute("PRAGMA table_info(dividas)")
     info = cursor.fetchall()
     colunas_atuais = [col[1] for col in info]
@@ -131,12 +122,10 @@ def migrar_tabela_dividas_se_necessario():
         "valor_restante", "data_criacao", "status"
     ]
 
-    # Se estiver correta, não faz nada
     if colunas_atuais == colunas_esperadas:
         conn.close()
         return
 
-    # Cria tabela nova
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dividas_nova (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,14 +138,12 @@ def migrar_tabela_dividas_se_necessario():
         )
     """)
 
-    # Tenta copiar dados da antiga para a nova
     try:
         df_antiga = pd.read_sql_query("SELECT * FROM dividas", conn)
     except:
         df_antiga = pd.DataFrame()
 
     if not df_antiga.empty:
-        # Cria colunas faltantes com valores padrão
         if "nome_pessoa" not in df_antiga.columns:
             df_antiga["nome_pessoa"] = "Sem nome"
         if "descricao" not in df_antiga.columns:
@@ -176,13 +163,11 @@ def migrar_tabela_dividas_se_necessario():
         if "status" not in df_antiga.columns:
             df_antiga["status"] = "Aberta"
 
-        # Mantém apenas colunas esperadas (sem id para evitar conflito)
         df_migrar = df_antiga[[
             "nome_pessoa", "descricao", "valor_total",
             "valor_restante", "data_criacao", "status"
         ]].copy()
 
-        # Ajustes de segurança
         df_migrar["nome_pessoa"] = df_migrar["nome_pessoa"].fillna("Sem nome").astype(str)
         df_migrar["descricao"] = df_migrar["descricao"].fillna("").astype(str)
         df_migrar["valor_total"] = pd.to_numeric(df_migrar["valor_total"], errors="coerce").fillna(0)
@@ -190,7 +175,6 @@ def migrar_tabela_dividas_se_necessario():
         df_migrar["data_criacao"] = df_migrar["data_criacao"].fillna(str(date.today())).astype(str)
         df_migrar["status"] = df_migrar["status"].fillna("Aberta").astype(str)
 
-        # Insere na nova
         for _, row in df_migrar.iterrows():
             cursor.execute("""
                 INSERT INTO dividas_nova
@@ -205,7 +189,6 @@ def migrar_tabela_dividas_se_necessario():
                 row["status"]
             ))
 
-    # Remove antiga e renomeia nova
     cursor.execute("DROP TABLE dividas")
     cursor.execute("ALTER TABLE dividas_nova RENAME TO dividas")
 
@@ -213,15 +196,103 @@ def migrar_tabela_dividas_se_necessario():
     conn.close()
 
 # ==========================================
+# MIGRAÇÃO REAL DA TABELA LANCAMENTOS
+# ==========================================
+def migrar_tabela_lancamentos_se_necessario():
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='lancamentos'
+    """)
+    existe = cursor.fetchone()
+
+    if not existe:
+        conn.close()
+        return
+
+    cursor.execute("PRAGMA table_info(lancamentos)")
+    info = cursor.fetchall()
+    colunas_atuais = [col[1] for col in info]
+
+    colunas_esperadas = [
+        "id", "data", "tipo", "categoria", "descricao",
+        "valor", "banco", "forma_pagamento"
+    ]
+
+    if colunas_atuais == colunas_esperadas:
+        conn.close()
+        return
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lancamentos_nova (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            tipo TEXT NOT NULL,
+            categoria TEXT NOT NULL,
+            descricao TEXT,
+            valor REAL NOT NULL,
+            banco TEXT,
+            forma_pagamento TEXT
+        )
+    """)
+
+    try:
+        df_antiga = pd.read_sql_query("SELECT * FROM lancamentos", conn)
+    except:
+        df_antiga = pd.DataFrame()
+
+    if not df_antiga.empty:
+        if "banco" not in df_antiga.columns:
+            df_antiga["banco"] = ""
+        if "forma_pagamento" not in df_antiga.columns:
+            df_antiga["forma_pagamento"] = ""
+
+        df_migrar = df_antiga[[
+            "data", "tipo", "categoria", "descricao",
+            "valor", "banco", "forma_pagamento"
+        ]].copy()
+
+        df_migrar["data"] = df_migrar["data"].fillna(str(date.today())).astype(str)
+        df_migrar["tipo"] = df_migrar["tipo"].fillna("").astype(str)
+        df_migrar["categoria"] = df_migrar["categoria"].fillna("").astype(str)
+        df_migrar["descricao"] = df_migrar["descricao"].fillna("").astype(str)
+        df_migrar["valor"] = pd.to_numeric(df_migrar["valor"], errors="coerce").fillna(0)
+        df_migrar["banco"] = df_migrar["banco"].fillna("").astype(str)
+        df_migrar["forma_pagamento"] = df_migrar["forma_pagamento"].fillna("").astype(str)
+
+        for _, row in df_migrar.iterrows():
+            cursor.execute("""
+                INSERT INTO lancamentos_nova
+                (data, tipo, categoria, descricao, valor, banco, forma_pagamento)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row["data"],
+                row["tipo"],
+                row["categoria"],
+                row["descricao"],
+                float(row["valor"]),
+                row["banco"],
+                row["forma_pagamento"]
+            ))
+
+    cursor.execute("DROP TABLE lancamentos")
+    cursor.execute("ALTER TABLE lancamentos_nova RENAME TO lancamentos")
+
+    conn.commit()
+    conn.close()
+
+# ==========================================
 # FUNÇÕES - LANÇAMENTOS
 # ==========================================
-def inserir_lancamento(data, tipo, categoria, descricao, valor):
+def inserir_lancamento(data, tipo, categoria, descricao, valor, banco, forma_pagamento):
     conn = conectar()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO lancamentos (data, tipo, categoria, descricao, valor)
-        VALUES (?, ?, ?, ?, ?)
-    """, (data, tipo, categoria, descricao, valor))
+        INSERT INTO lancamentos (data, tipo, categoria, descricao, valor, banco, forma_pagamento)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (data, tipo, categoria, descricao, valor, banco, forma_pagamento))
     conn.commit()
     conn.close()
 
@@ -230,7 +301,7 @@ def listar_lancamentos():
     try:
         df = pd.read_sql_query("SELECT * FROM lancamentos ORDER BY data DESC, id DESC", conn)
     except:
-        df = pd.DataFrame(columns=["id", "data", "tipo", "categoria", "descricao", "valor"])
+        df = pd.DataFrame(columns=["id", "data", "tipo", "categoria", "descricao", "valor", "banco", "forma_pagamento"])
     conn.close()
     return df
 
@@ -283,14 +354,16 @@ def pagar_divida(id_divida, valor_pagamento, data_pagamento):
         """, (novo_valor_restante, novo_status, id_divida))
 
         cursor.execute("""
-            INSERT INTO lancamentos (data, tipo, categoria, descricao, valor)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO lancamentos (data, tipo, categoria, descricao, valor, banco, forma_pagamento)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             data_pagamento,
             "Despesa",
             "Pagamento de Dívida",
             f"Pagamento de dívida para {nome_pessoa}",
-            valor_pagamento_real
+            valor_pagamento_real,
+            "",
+            ""
         ))
 
     conn.commit()
@@ -302,91 +375,6 @@ def excluir_divida(id_divida):
     cursor.execute("DELETE FROM dividas WHERE id = ?", (id_divida,))
     conn.commit()
     conn.close()
-
-# ==========================================
-# FUNÇÕES - CARTÃO
-# ==========================================
-def inserir_cartao(nome_cartao, limite_total):
-    conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO cartao (nome_cartao, limite_total, limite_usado)
-        VALUES (?, ?, 0)
-    """, (nome_cartao, limite_total))
-    conn.commit()
-    conn.close()
-
-def listar_cartoes():
-    conn = conectar()
-    try:
-        df = pd.read_sql_query("SELECT * FROM cartao ORDER BY id DESC", conn)
-    except:
-        df = pd.DataFrame(columns=["id", "nome_cartao", "limite_total", "limite_usado"])
-    conn.close()
-    return df
-
-def usar_cartao(id_cartao, valor_compra, descricao_compra, data_compra):
-    conn = conectar()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT nome_cartao, limite_total, limite_usado FROM cartao WHERE id = ?", (id_cartao,))
-    resultado = cursor.fetchone()
-
-    if resultado:
-        nome_cartao, limite_total, limite_usado = resultado
-        novo_usado = limite_usado + valor_compra
-
-        if novo_usado <= limite_total:
-            cursor.execute("""
-                UPDATE cartao
-                SET limite_usado = ?
-                WHERE id = ?
-            """, (novo_usado, id_cartao))
-
-            cursor.execute("""
-                INSERT INTO lancamentos (data, tipo, categoria, descricao, valor)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                data_compra,
-                "Despesa",
-                "Cartão",
-                f"{descricao_compra} ({nome_cartao})",
-                valor_compra
-            ))
-            conn.commit()
-            conn.close()
-            return True, "Compra registrada no cartão!"
-        else:
-            conn.close()
-            return False, "Compra excede o limite disponível."
-
-    conn.close()
-    return False, "Cartão não encontrado."
-
-def pagar_fatura_cartao(id_cartao, valor_pagamento):
-    conn = conectar()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT limite_usado, nome_cartao FROM cartao WHERE id = ?", (id_cartao,))
-    resultado = cursor.fetchone()
-
-    if resultado:
-        limite_usado, nome_cartao = resultado
-        pagamento_real = min(valor_pagamento, limite_usado)
-        novo_usado = max(limite_usado - pagamento_real, 0)
-
-        cursor.execute("""
-            UPDATE cartao
-            SET limite_usado = ?
-            WHERE id = ?
-        """, (novo_usado, id_cartao))
-
-        conn.commit()
-        conn.close()
-        return True, f"Pagamento da fatura do cartão {nome_cartao} registrado!"
-
-    conn.close()
-    return False, "Cartão não encontrado."
 
 # ==========================================
 # UTILITÁRIOS
@@ -409,8 +397,16 @@ CATEGORIAS_DESPESA = [
     "Compras",
     "Contas Fixas",
     "Outros",
-    "Pagamento de Dívida",
-    "Cartão"
+    "Pagamento de Dívida"
+]
+
+FORMAS_PAGAMENTO = [
+    "Débito",
+    "Crédito",
+    "Pix",
+    "Dinheiro",
+    "Boleto",
+    "Transferência"
 ]
 
 # ==========================================
@@ -418,6 +414,7 @@ CATEGORIAS_DESPESA = [
 # ==========================================
 criar_tabelas()
 migrar_tabela_dividas_se_necessario()
+migrar_tabela_lancamentos_se_necessario()
 
 # ==========================================
 # TÍTULO
@@ -430,7 +427,6 @@ st.caption("Versão simples, organizada e melhor para celular")
 # ==========================================
 df = listar_lancamentos()
 df_dividas = listar_dividas()
-df_cartoes = listar_cartoes()
 
 if not df.empty:
     df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
@@ -442,11 +438,6 @@ if not df_dividas.empty:
         if col in df_dividas.columns:
             df_dividas[col] = pd.to_numeric(df_dividas[col], errors="coerce").fillna(0)
 
-if not df_cartoes.empty:
-    for col in ["limite_total", "limite_usado"]:
-        if col in df_cartoes.columns:
-            df_cartoes[col] = pd.to_numeric(df_cartoes[col], errors="coerce").fillna(0)
-
 # ==========================================
 # RESUMO
 # ==========================================
@@ -454,7 +445,6 @@ receitas = df[df["tipo"] == "Receita"]["valor"].sum() if not df.empty else 0
 despesas = df[df["tipo"] == "Despesa"]["valor"].sum() if not df.empty else 0
 saldo = receitas - despesas
 dividas_abertas = df_dividas[df_dividas["status"] == "Aberta"]["valor_restante"].sum() if not df_dividas.empty and "status" in df_dividas.columns else 0
-cartao_usado = df_cartoes["limite_usado"].sum() if not df_cartoes.empty else 0
 
 m1, m2 = st.columns(2)
 with m1:
@@ -467,9 +457,6 @@ with m3:
     st.metric("Saldo", formatar_brl(saldo))
 with m4:
     st.metric("Dívidas em Aberto", formatar_brl(dividas_abertas))
-
-if not df_cartoes.empty:
-    st.metric("Uso total do Cartão", formatar_brl(cartao_usado))
 
 st.divider()
 
@@ -484,10 +471,12 @@ categorias = CATEGORIAS_RECEITA if tipo == "Receita" else CATEGORIAS_DESPESA
 categoria = st.selectbox("Categoria", categorias, key="categoria_lanc")
 descricao = st.text_input("Descrição", key="descricao_lanc")
 valor = st.number_input("Valor (R$)", min_value=0.0, format="%.2f", key="valor_lanc")
+banco = st.text_input("Banco / Instituição", key="banco_lanc")
+forma_pagamento = st.selectbox("Forma de pagamento", FORMAS_PAGAMENTO, key="forma_pagamento_lanc")
 
 if st.button("Salvar Lançamento"):
     if valor > 0:
-        inserir_lancamento(str(data_lanc), tipo, categoria, descricao, valor)
+        inserir_lancamento(str(data_lanc), tipo, categoria, descricao, valor, banco.strip(), forma_pagamento)
         st.success("Lançamento salvo com sucesso!")
         st.rerun()
     else:
@@ -500,7 +489,6 @@ st.divider()
 # ==========================================
 st.subheader("📊 Gráficos")
 
-# Gráfico 1: Resumo com cores diferentes
 resumo_grafico = pd.DataFrame({
     "Tipo": ["Entradas", "Despesas"],
     "Valor": [receitas, despesas]
@@ -524,7 +512,6 @@ grafico_resumo = alt.Chart(resumo_grafico).mark_bar().encode(
 
 st.altair_chart(grafico_resumo, use_container_width=True)
 
-# Gráfico 2: Entradas e despesas por mês
 st.markdown("**Entradas e despesas por mês**")
 if not df.empty:
     mensal_tipo = df.groupby(["mes", "tipo"])["valor"].sum().reset_index()
@@ -554,7 +541,6 @@ if not df.empty:
 else:
     st.info("Sem lançamentos cadastrados ainda.")
 
-# Gráfico 3: Gastos por categoria com cores diferentes
 st.markdown("**Gastos por categoria**")
 if not df.empty:
     despesas_df = df[df["tipo"] == "Despesa"]
@@ -589,16 +575,14 @@ resumo_geral = pd.DataFrame({
         "Total de Entradas",
         "Total de Despesas",
         "Saldo Atual",
-        "Dívidas em Aberto",
-        "Uso Total do Cartão"
+        "Dívidas em Aberto"
     ],
-    "Valor": [receitas, despesas, saldo, dividas_abertas, cartao_usado]
+    "Valor": [receitas, despesas, saldo, dividas_abertas]
 })
 resumo_geral["Valor"] = resumo_geral["Valor"].apply(formatar_brl)
 
 st.dataframe(resumo_geral, use_container_width=True, hide_index=True)
 
-# Resumo mensal
 st.markdown("**Resumo mensal**")
 if not df.empty:
     resumo_mensal = df.groupby(["mes", "tipo"])["valor"].sum().unstack(fill_value=0).reset_index()
@@ -637,8 +621,13 @@ if not df.empty:
     df_exibir["data"] = df_exibir["data"].dt.strftime("%d/%m/%Y")
     df_exibir["valor"] = df_exibir["valor"].apply(formatar_brl)
 
+    if "banco" not in df_exibir.columns:
+        df_exibir["banco"] = ""
+    if "forma_pagamento" not in df_exibir.columns:
+        df_exibir["forma_pagamento"] = ""
+
     st.dataframe(
-        df_exibir[["id", "data", "tipo", "categoria", "descricao", "valor"]],
+        df_exibir[["id", "data", "tipo", "categoria", "descricao", "valor", "banco", "forma_pagamento"]],
         use_container_width=True,
         hide_index=True
     )
@@ -655,78 +644,6 @@ if not df.empty:
         st.rerun()
 else:
     st.info("Nenhum lançamento cadastrado.")
-
-st.divider()
-
-# ==========================================
-# CARTÃO
-# ==========================================
-st.subheader("💳 Cartão")
-
-with st.expander("Cadastrar cartão", expanded=False):
-    nome_cartao = st.text_input("Nome do cartão", key="nome_cartao")
-    limite_cartao = st.number_input("Limite total (R$)", min_value=0.0, format="%.2f", key="limite_cartao")
-
-    if st.button("Salvar Cartão"):
-        if nome_cartao.strip() and limite_cartao > 0:
-            inserir_cartao(nome_cartao.strip(), limite_cartao)
-            st.success("Cartão cadastrado com sucesso!")
-            st.rerun()
-        else:
-            st.warning("Preencha o nome e um limite maior que zero.")
-
-if not df_cartoes.empty:
-    st.markdown("**Cartões cadastrados**")
-    df_cartoes_exibir = df_cartoes.copy()
-    df_cartoes_exibir["disponivel"] = df_cartoes_exibir["limite_total"] - df_cartoes_exibir["limite_usado"]
-    df_cartoes_exibir["limite_total"] = df_cartoes_exibir["limite_total"].apply(formatar_brl)
-    df_cartoes_exibir["limite_usado"] = df_cartoes_exibir["limite_usado"].apply(formatar_brl)
-    df_cartoes_exibir["disponivel"] = df_cartoes_exibir["disponivel"].apply(formatar_brl)
-
-    st.dataframe(
-        df_cartoes_exibir[["id", "nome_cartao", "limite_total", "limite_usado", "disponivel"]],
-        use_container_width=True,
-        hide_index=True
-    )
-
-    opcoes_cartao = {
-        f'ID {row["id"]} - {row["nome_cartao"]}': row["id"]
-        for _, row in df_cartoes.iterrows()
-    }
-
-    with st.expander("Registrar compra no cartão", expanded=False):
-        cartao_selecionado = st.selectbox("Selecione o cartão", list(opcoes_cartao.keys()), key="cartao_compra")
-        data_compra = st.date_input("Data da compra", value=date.today(), key="data_compra")
-        descricao_compra = st.text_input("Descrição da compra", key="descricao_compra")
-        valor_compra = st.number_input("Valor da compra (R$)", min_value=0.0, format="%.2f", key="valor_compra")
-
-        if st.button("Registrar Compra no Cartão"):
-            if valor_compra > 0:
-                ok, msg = usar_cartao(opcoes_cartao[cartao_selecionado], valor_compra, descricao_compra, str(data_compra))
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.warning(msg)
-            else:
-                st.warning("Informe um valor maior que zero.")
-
-    with st.expander("Pagar fatura do cartão", expanded=False):
-        cartao_fatura = st.selectbox("Selecione o cartão para pagar fatura", list(opcoes_cartao.keys()), key="cartao_fatura")
-        valor_fatura = st.number_input("Valor do pagamento da fatura (R$)", min_value=0.0, format="%.2f", key="valor_fatura")
-
-        if st.button("Pagar Fatura"):
-            if valor_fatura > 0:
-                ok, msg = pagar_fatura_cartao(opcoes_cartao[cartao_fatura], valor_fatura)
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.warning(msg)
-            else:
-                st.warning("Informe um valor maior que zero.")
-else:
-    st.info("Nenhum cartão cadastrado ainda.")
 
 st.divider()
 
