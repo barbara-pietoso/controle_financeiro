@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import altair as alt
 from datetime import date
 
 # ==========================================
@@ -434,6 +435,7 @@ df_cartoes = listar_cartoes()
 if not df.empty:
     df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    df["mes"] = df["data"].dt.to_period("M").astype(str)
 
 if not df_dividas.empty:
     for col in ["valor_total", "valor_restante"]:
@@ -498,18 +500,78 @@ st.divider()
 # ==========================================
 st.subheader("📊 Gráficos")
 
+# Gráfico 1: Resumo com cores diferentes
 resumo_grafico = pd.DataFrame({
     "Tipo": ["Entradas", "Despesas"],
     "Valor": [receitas, despesas]
-}).set_index("Tipo")
-st.bar_chart(resumo_grafico)
+})
 
+grafico_resumo = alt.Chart(resumo_grafico).mark_bar().encode(
+    x=alt.X("Tipo:N", sort=["Entradas", "Despesas"]),
+    y=alt.Y("Valor:Q"),
+    color=alt.Color(
+        "Tipo:N",
+        scale=alt.Scale(
+            domain=["Entradas", "Despesas"],
+            range=["#16a34a", "#dc2626"]
+        ),
+        legend=None
+    ),
+    tooltip=["Tipo", alt.Tooltip("Valor:Q", format=",.2f")]
+).properties(
+    height=350
+)
+
+st.altair_chart(grafico_resumo, use_container_width=True)
+
+# Gráfico 2: Entradas e despesas por mês
+st.markdown("**Entradas e despesas por mês**")
+if not df.empty:
+    mensal_tipo = df.groupby(["mes", "tipo"])["valor"].sum().reset_index()
+    mensal_tipo["tipo_grafico"] = mensal_tipo["tipo"].replace({
+        "Receita": "Entradas",
+        "Despesa": "Despesas"
+    })
+
+    grafico_mensal = alt.Chart(mensal_tipo).mark_bar().encode(
+        x=alt.X("mes:N", title="Mês", sort=None),
+        y=alt.Y("valor:Q", title="Valor"),
+        color=alt.Color(
+            "tipo_grafico:N",
+            scale=alt.Scale(
+                domain=["Entradas", "Despesas"],
+                range=["#16a34a", "#dc2626"]
+            ),
+            title="Tipo"
+        ),
+        xOffset="tipo_grafico:N",
+        tooltip=["mes", "tipo_grafico", alt.Tooltip("valor:Q", format=",.2f")]
+    ).properties(
+        height=350
+    )
+
+    st.altair_chart(grafico_mensal, use_container_width=True)
+else:
+    st.info("Sem lançamentos cadastrados ainda.")
+
+# Gráfico 3: Gastos por categoria com cores diferentes
 st.markdown("**Gastos por categoria**")
 if not df.empty:
     despesas_df = df[df["tipo"] == "Despesa"]
     if not despesas_df.empty:
-        gastos_categoria = despesas_df.groupby("categoria")["valor"].sum().sort_values(ascending=False)
-        st.bar_chart(gastos_categoria)
+        gastos_categoria = despesas_df.groupby("categoria")["valor"].sum().reset_index()
+        gastos_categoria = gastos_categoria.sort_values("valor", ascending=False)
+
+        grafico_categoria = alt.Chart(gastos_categoria).mark_bar().encode(
+            x=alt.X("categoria:N", sort="-y", title="Categoria"),
+            y=alt.Y("valor:Q", title="Valor"),
+            color=alt.Color("categoria:N", legend=None),
+            tooltip=["categoria", alt.Tooltip("valor:Q", format=",.2f")]
+        ).properties(
+            height=350
+        )
+
+        st.altair_chart(grafico_categoria, use_container_width=True)
     else:
         st.info("Sem despesas cadastradas ainda.")
 else:
@@ -535,6 +597,33 @@ resumo_geral = pd.DataFrame({
 resumo_geral["Valor"] = resumo_geral["Valor"].apply(formatar_brl)
 
 st.dataframe(resumo_geral, use_container_width=True, hide_index=True)
+
+# Resumo mensal
+st.markdown("**Resumo mensal**")
+if not df.empty:
+    resumo_mensal = df.groupby(["mes", "tipo"])["valor"].sum().unstack(fill_value=0).reset_index()
+
+    if "Receita" not in resumo_mensal.columns:
+        resumo_mensal["Receita"] = 0
+    if "Despesa" not in resumo_mensal.columns:
+        resumo_mensal["Despesa"] = 0
+
+    resumo_mensal["Saldo"] = resumo_mensal["Receita"] - resumo_mensal["Despesa"]
+
+    resumo_mensal = resumo_mensal.rename(columns={
+        "mes": "Mês",
+        "Receita": "Entradas",
+        "Despesa": "Despesas"
+    })
+
+    resumo_mensal_exibir = resumo_mensal.copy()
+    resumo_mensal_exibir["Entradas"] = resumo_mensal_exibir["Entradas"].apply(formatar_brl)
+    resumo_mensal_exibir["Despesas"] = resumo_mensal_exibir["Despesas"].apply(formatar_brl)
+    resumo_mensal_exibir["Saldo"] = resumo_mensal_exibir["Saldo"].apply(formatar_brl)
+
+    st.dataframe(resumo_mensal_exibir, use_container_width=True, hide_index=True)
+else:
+    st.info("Sem dados mensais ainda.")
 
 st.divider()
 
@@ -724,7 +813,17 @@ if not df_dividas.empty:
         abertas = df_dividas[df_dividas["status"] == "Aberta"]
         if not abertas.empty:
             st.markdown("**Dívidas abertas por pessoa**")
-            graf_dividas = abertas.groupby("nome_pessoa")["valor_restante"].sum().sort_values(ascending=False)
-            st.bar_chart(graf_dividas)
+            graf_dividas = abertas.groupby("nome_pessoa")["valor_restante"].sum().reset_index()
+
+            grafico_dividas = alt.Chart(graf_dividas).mark_bar().encode(
+                x=alt.X("nome_pessoa:N", sort="-y", title="Pessoa"),
+                y=alt.Y("valor_restante:Q", title="Valor Restante"),
+                color=alt.Color("nome_pessoa:N", legend=None),
+                tooltip=["nome_pessoa", alt.Tooltip("valor_restante:Q", format=",.2f")]
+            ).properties(
+                height=350
+            )
+
+            st.altair_chart(grafico_dividas, use_container_width=True)
 else:
     st.info("Nenhuma dívida cadastrada.")
