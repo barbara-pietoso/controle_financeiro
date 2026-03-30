@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 # CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="Financeiro Pessoal V4 Profissional",
+    page_title="Finanças app",
     page_icon="💸",
     layout="wide",
 )
@@ -27,7 +27,7 @@ TIPOS = ["Receita", "Despesa"]
 
 CATEGORIAS = [
     "Salário",
-    "Freelance",
+    "Freela",
     "Alimentação",
     "Mercado",
     "Transporte",
@@ -38,7 +38,6 @@ CATEGORIAS = [
     "Educação",
     "Assinaturas",
     "Fatura Cartão",
-    "Vale Alimentação",
     "Outros",
 ]
 
@@ -443,7 +442,7 @@ def calc_categoria_despesas(df):
 def header():
     st.markdown("""
     <div class="title-card">
-        <h1 style="margin:0;">💸 Financeiro Pessoal V4 Profissional</h1>
+        <h1 style="margin:0;">💸 Finançasapp</h1>
         <p style="margin:0.35rem 0 0 0; opacity:0.9;">
             Controle completo de lançamentos, parcelamentos, dívidas e saldos por banco/cartão
         </p>
