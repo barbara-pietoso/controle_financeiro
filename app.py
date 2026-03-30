@@ -305,6 +305,29 @@ def listar_lancamentos():
     conn.close()
     return df
 
+def buscar_lancamento_por_id(id_lancamento):
+    conn = conectar()
+    try:
+        df = pd.read_sql_query("SELECT * FROM lancamentos WHERE id = ?", conn, params=(id_lancamento,))
+        if not df.empty:
+            return df.iloc[0].to_dict()
+        return None
+    except:
+        return None
+    finally:
+        conn.close()
+
+def atualizar_lancamento(id_lancamento, data, tipo, categoria, descricao, valor, banco, forma_pagamento):
+    conn = conectar()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE lancamentos
+        SET data = ?, tipo = ?, categoria = ?, descricao = ?, valor = ?, banco = ?, forma_pagamento = ?
+        WHERE id = ?
+    """, (data, tipo, categoria, descricao, valor, banco, forma_pagamento, id_lancamento))
+    conn.commit()
+    conn.close()
+
 def excluir_lancamento(id_lancamento):
     conn = conectar()
     cursor = conn.cursor()
@@ -436,10 +459,36 @@ if not df_dividas.empty:
             df_dividas[col] = pd.to_numeric(df_dividas[col], errors="coerce").fillna(0)
 
 # ==========================================
+# FILTRO POR MÊS
+# ==========================================
+st.subheader("🗓️ Filtro por Mês")
+
+if not df.empty:
+    meses_disponiveis = sorted(df["mes"].dropna().unique().tolist(), reverse=True)
+    opcoes_meses = ["Todos"] + meses_disponiveis
+
+    mes_selecionado = st.selectbox(
+        "Selecione o mês para filtrar",
+        opcoes_meses,
+        key="filtro_mes"
+    )
+
+    if mes_selecionado == "Todos":
+        df_filtrado = df.copy()
+    else:
+        df_filtrado = df[df["mes"] == mes_selecionado].copy()
+else:
+    mes_selecionado = "Todos"
+    df_filtrado = df.copy()
+    st.info("Sem lançamentos para filtrar ainda.")
+
+st.divider()
+
+# ==========================================
 # RESUMO
 # ==========================================
-receitas = df[df["tipo"] == "Receita"]["valor"].sum() if not df.empty else 0
-despesas = df[df["tipo"] == "Despesa"]["valor"].sum() if not df.empty else 0
+receitas = df_filtrado[df_filtrado["tipo"] == "Receita"]["valor"].sum() if not df_filtrado.empty else 0
+despesas = df_filtrado[df_filtrado["tipo"] == "Despesa"]["valor"].sum() if not df_filtrado.empty else 0
 saldo = receitas - despesas
 dividas_abertas = df_dividas[df_dividas["status"] == "Aberta"]["valor_restante"].sum() if not df_dividas.empty and "status" in df_dividas.columns else 0
 
@@ -478,6 +527,78 @@ if st.button("Salvar Lançamento"):
         st.rerun()
     else:
         st.warning("Informe um valor maior que zero.")
+
+st.divider()
+
+# ==========================================
+# EDITAR LANÇAMENTO
+# ==========================================
+st.subheader("✏️ Editar Lançamento")
+
+if not df.empty:
+    ids_lancamentos = df["id"].tolist()
+    id_editar = st.selectbox("Selecione o ID do lançamento para editar", ids_lancamentos, key="id_editar_lanc")
+
+    lancamento_editar = buscar_lancamento_por_id(id_editar)
+
+    if lancamento_editar:
+        try:
+            data_padrao = pd.to_datetime(lancamento_editar["data"]).date()
+        except:
+            data_padrao = date.today()
+
+        tipo_padrao = lancamento_editar["tipo"] if lancamento_editar["tipo"] in ["Receita", "Despesa"] else "Despesa"
+        categorias_edicao = CATEGORIAS_RECEITA if tipo_padrao == "Receita" else CATEGORIAS_DESPESA
+
+        categoria_padrao = lancamento_editar["categoria"] if lancamento_editar["categoria"] in categorias_edicao else categorias_edicao[0]
+        forma_padrao = lancamento_editar["forma_pagamento"] if lancamento_editar["forma_pagamento"] in FORMAS_PAGAMENTO else FORMAS_PAGAMENTO[0]
+
+        data_edit = st.date_input("Data (edição)", value=data_padrao, key="data_edit")
+        tipo_edit = st.selectbox(
+            "Tipo (edição)",
+            ["Receita", "Despesa"],
+            index=0 if tipo_padrao == "Receita" else 1,
+            key="tipo_edit"
+        )
+
+        categorias_edicao_dinamica = CATEGORIAS_RECEITA if tipo_edit == "Receita" else CATEGORIAS_DESPESA
+
+        categoria_edit = st.selectbox(
+            "Categoria (edição)",
+            categorias_edicao_dinamica,
+            index=categorias_edicao_dinamica.index(categoria_padrao) if categoria_padrao in categorias_edicao_dinamica else 0,
+            key="categoria_edit"
+        )
+
+        descricao_edit = st.text_input("Descrição (edição)", value=lancamento_editar["descricao"] or "", key="descricao_edit")
+        valor_edit = st.number_input("Valor (R$) (edição)", min_value=0.0, value=float(lancamento_editar["valor"]), format="%.2f", key="valor_edit")
+        banco_edit = st.text_input("Banco / Instituição (edição)", value=lancamento_editar["banco"] or "", key="banco_edit")
+
+        forma_edit = st.selectbox(
+            "Forma de pagamento (edição)",
+            FORMAS_PAGAMENTO,
+            index=FORMAS_PAGAMENTO.index(forma_padrao) if forma_padrao in FORMAS_PAGAMENTO else 0,
+            key="forma_edit"
+        )
+
+        if st.button("Salvar Alterações"):
+            if valor_edit > 0:
+                atualizar_lancamento(
+                    id_editar,
+                    str(data_edit),
+                    tipo_edit,
+                    categoria_edit,
+                    descricao_edit,
+                    valor_edit,
+                    banco_edit.strip(),
+                    forma_edit
+                )
+                st.success("Lançamento atualizado com sucesso!")
+                st.rerun()
+            else:
+                st.warning("Informe um valor maior que zero.")
+else:
+    st.info("Nenhum lançamento para editar.")
 
 st.divider()
 
@@ -538,9 +659,9 @@ if not df.empty:
 else:
     st.info("Sem lançamentos cadastrados ainda.")
 
-st.markdown("**Gastos por categoria**")
-if not df.empty:
-    despesas_df = df[df["tipo"] == "Despesa"]
+st.markdown("**Gastos por categoria (respeita o filtro de mês)**")
+if not df_filtrado.empty:
+    despesas_df = df_filtrado[df_filtrado["tipo"] == "Despesa"]
     if not despesas_df.empty:
         gastos_categoria = despesas_df.groupby("categoria")["valor"].sum().reset_index()
         gastos_categoria = gastos_categoria.sort_values("valor", ascending=False)
@@ -556,9 +677,9 @@ if not df.empty:
 
         st.altair_chart(grafico_categoria, use_container_width=True)
     else:
-        st.info("Sem despesas cadastradas ainda.")
+        st.info("Sem despesas no filtro selecionado.")
 else:
-    st.info("Sem lançamentos cadastrados ainda.")
+    st.info("Sem lançamentos no filtro selecionado.")
 
 st.divider()
 
@@ -566,6 +687,9 @@ st.divider()
 # RELAÇÃO GERAL
 # ==========================================
 st.subheader("📋 Relação Geral")
+
+titulo_periodo = "Todos os meses" if mes_selecionado == "Todos" else f"Filtro: {mes_selecionado}"
+st.caption(titulo_periodo)
 
 resumo_geral = pd.DataFrame({
     "Indicador": [
@@ -580,7 +704,7 @@ resumo_geral["Valor"] = resumo_geral["Valor"].apply(formatar_brl)
 
 st.dataframe(resumo_geral, use_container_width=True, hide_index=True)
 
-st.markdown("**Resumo mensal**")
+st.markdown("**Resumo mensal (geral, independente do filtro)**")
 if not df.empty:
     resumo_mensal = df.groupby(["mes", "tipo"])["valor"].sum().unstack(fill_value=0).reset_index()
 
@@ -613,8 +737,8 @@ st.divider()
 # ==========================================
 st.subheader("🧾 Lançamentos")
 
-if not df.empty:
-    df_exibir = df.copy()
+if not df_filtrado.empty:
+    df_exibir = df_filtrado.copy()
     df_exibir["data"] = df_exibir["data"].dt.strftime("%d/%m/%Y")
     df_exibir["valor"] = df_exibir["valor"].apply(formatar_brl)
 
@@ -631,7 +755,7 @@ if not df.empty:
 
     id_excluir_lanc = st.selectbox(
         "Selecione o ID do lançamento para excluir",
-        df["id"].tolist(),
+        df_filtrado["id"].tolist(),
         key="excluir_lanc"
     )
 
@@ -640,7 +764,7 @@ if not df.empty:
         st.success("Lançamento excluído com sucesso!")
         st.rerun()
 else:
-    st.info("Nenhum lançamento cadastrado.")
+    st.info("Nenhum lançamento no filtro selecionado.")
 
 st.divider()
 
