@@ -541,8 +541,7 @@ if not df_parcelas.empty:
 # =========================================================
 # HEADER
 # =========================================================
-st.title("💰 Controle Financeiro Pro")
-st.caption("Versão mais robusta, com filtros, edição rápida, saldo por conta e parcelamento futuro")
+st.title("💰 Finanças")
 
 # =========================================================
 # FILTROS
