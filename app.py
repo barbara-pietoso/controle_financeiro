@@ -9,7 +9,7 @@ from dateutil.relativedelta import relativedelta
 # CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="Controle Financeiro Pro",
+    page_title="Finanças",
     page_icon="💰",
     layout="wide"
 )
