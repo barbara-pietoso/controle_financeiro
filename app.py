@@ -2,881 +2,830 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from datetime import datetime, date
-import plotly.express as px
 from dateutil.relativedelta import relativedelta
 
 # =========================================================
 # CONFIG
 # =========================================================
-DB_NAME = "financeiro.db"
-
 st.set_page_config(
-    page_title="Financeiro Pessoal V3",
-    page_icon="💰",
+    page_title="Financeiro Pessoal V4 Profissional",
+    page_icon="💸",
     layout="wide",
-    initial_sidebar_state="collapsed"
 )
 
+DB_NAME = "financeiro.db"
+
+BANCOS = [
+    "Banco do Brasil",
+    "Banrisul",
+    "Nubank",
+    "Itaú",
+    "Flash (Vale Alimentação)"
+]
+
+TIPOS = ["Receita", "Despesa"]
+
+CATEGORIAS = [
+    "Salário",
+    "Freelance",
+    "Alimentação",
+    "Mercado",
+    "Transporte",
+    "Combustível",
+    "Moradia",
+    "Lazer",
+    "Saúde",
+    "Educação",
+    "Assinaturas",
+    "Fatura Cartão",
+    "Vale Alimentação",
+    "Outros",
+]
+
 # =========================================================
-# CSS (MOBILE + VISUAL MELHORADO)
+# ESTILO / CSS MOBILE FIRST
 # =========================================================
 st.markdown("""
 <style>
     .main > div {
         padding-top: 1rem;
-        padding-bottom: 3rem;
+        padding-bottom: 2rem;
     }
 
     .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 4rem !important;
-        padding-left: 0.8rem !important;
-        padding-right: 0.8rem !important;
-        max-width: 1200px;
+        padding-top: 1rem;
+        padding-bottom: 2rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 1400px;
     }
 
-    h1, h2, h3 {
-        letter-spacing: -0.5px;
-    }
-
-    .card-metric {
-        background: linear-gradient(135deg, #111827 0%, #1f2937 100%);
-        padding: 1rem;
+    .title-card {
+        background: linear-gradient(135deg, #0f172a, #1e3a8a);
+        padding: 1.2rem 1.4rem;
         border-radius: 18px;
-        border: 1px solid rgba(255,255,255,0.08);
-        box-shadow: 0 8px 25px rgba(0,0,0,0.12);
-        margin-bottom: 0.8rem;
+        color: white;
+        margin-bottom: 1rem;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.18);
     }
 
-    .card-light {
-        background: rgba(255,255,255,0.03);
-        padding: 0.9rem;
+    .section-card {
+        background: #ffffff;
+        border-radius: 18px;
+        padding: 1rem;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.08);
+        border: 1px solid #e5e7eb;
+        margin-bottom: 1rem;
+    }
+
+    .metric-card {
+        background: white;
+        border-radius: 18px;
+        padding: 1rem;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.08);
+        border: 1px solid #e5e7eb;
+        text-align: center;
+    }
+
+    .small-muted {
+        color: #6b7280;
+        font-size: 0.85rem;
+    }
+
+    .launch-row {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
         border-radius: 16px;
-        border: 1px solid rgba(255,255,255,0.06);
+        padding: 0.7rem 0.9rem;
         margin-bottom: 0.6rem;
+        box-shadow: 0 4px 12px rgba(15,23,42,0.05);
     }
 
-    .small-label {
-        font-size: 0.8rem;
-        opacity: 0.75;
-        margin-bottom: 0.2rem;
+    .stButton>button {
+        border-radius: 12px !important;
+        font-weight: 600 !important;
     }
 
-    .big-number {
-        font-size: 1.4rem;
-        font-weight: 700;
-    }
-
-    .launch-card {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 16px;
-        padding: 0.8rem;
-        margin-bottom: 0.7rem;
-    }
-
-    .divider-soft {
-        height: 1px;
-        background: rgba(255,255,255,0.06);
-        margin: 0.7rem 0;
-        border-radius: 999px;
+    .stDownloadButton>button {
+        border-radius: 12px !important;
     }
 
     @media (max-width: 768px) {
         .block-container {
-            padding-left: 0.5rem !important;
-            padding-right: 0.5rem !important;
+            padding-left: 0.6rem;
+            padding-right: 0.6rem;
         }
     }
 </style>
 """, unsafe_allow_html=True)
 
 # =========================================================
-# DB HELPERS
+# DB
 # =========================================================
 def get_conn():
     return sqlite3.connect(DB_NAME, check_same_thread=False)
 
-def execute(query, params=()):
+def init_db():
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(query, params)
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS lancamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            descricao TEXT NOT NULL,
+            tipo TEXT NOT NULL,
+            categoria TEXT NOT NULL,
+            banco TEXT NOT NULL,
+            valor REAL NOT NULL,
+            observacao TEXT,
+            origem TEXT DEFAULT 'manual',
+            grupo_parcelamento TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS dividas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            descricao TEXT NOT NULL,
+            banco TEXT NOT NULL,
+            categoria TEXT NOT NULL,
+            valor_total REAL NOT NULL,
+            parcelas INTEGER NOT NULL,
+            parcela_atual INTEGER NOT NULL,
+            valor_parcela REAL NOT NULL,
+            data_primeira_parcela TEXT NOT NULL,
+            observacao TEXT,
+            grupo_parcelamento TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
-def fetch_all(query, params=()):
+# =========================================================
+# HELPERS
+# =========================================================
+def br_money(v):
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def to_date(text):
+    return datetime.strptime(text, "%Y-%m-%d").date()
+
+def month_bounds(ref_date):
+    first = ref_date.replace(day=1)
+    next_month = first + relativedelta(months=1)
+    last = next_month - relativedelta(days=1)
+    return first, last
+
+def get_period_filter():
+    st.markdown("### 🔎 Filtros")
+    c1, c2, c3 = st.columns([1, 1, 1])
+
+    today = date.today()
+    current_month_start, current_month_end = month_bounds(today)
+
+    with c1:
+        filter_mode = st.radio(
+            "Modo de filtro",
+            ["Mês", "Período"],
+            horizontal=True,
+            key="filter_mode"
+        )
+
+    if filter_mode == "Mês":
+        with c2:
+            ano = st.number_input("Ano", min_value=2020, max_value=2100, value=today.year, step=1)
+        with c3:
+            mes = st.selectbox(
+                "Mês",
+                options=list(range(1, 13)),
+                index=today.month - 1,
+                format_func=lambda x: [
+                    "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                    "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+                ][x - 1]
+            )
+        start = date(int(ano), int(mes), 1)
+        end = start + relativedelta(months=1) - relativedelta(days=1)
+    else:
+        with c2:
+            start = st.date_input("Data inicial", value=current_month_start, key="period_start")
+        with c3:
+            end = st.date_input("Data final", value=current_month_end, key="period_end")
+
+    if start > end:
+        st.warning("A data inicial não pode ser maior que a data final.")
+        return None, None
+
+    return start, end
+
+# =========================================================
+# CRUD LANCAMENTOS
+# =========================================================
+def add_lancamento(data, descricao, tipo, categoria, banco, valor, observacao="", origem="manual", grupo_parcelamento=None):
     conn = get_conn()
-    df = pd.read_sql_query(query, conn, params=params)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO lancamentos (data, descricao, tipo, categoria, banco, valor, observacao, origem, grupo_parcelamento)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (data, descricao, tipo, categoria, banco, valor, observacao, origem, grupo_parcelamento))
+    conn.commit()
+    conn.close()
+
+def update_lancamento(lanc_id, data, descricao, tipo, categoria, banco, valor, observacao):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE lancamentos
+        SET data=?, descricao=?, tipo=?, categoria=?, banco=?, valor=?, observacao=?
+        WHERE id=?
+    """, (data, descricao, tipo, categoria, banco, valor, observacao, lanc_id))
+    conn.commit()
+    conn.close()
+
+def delete_lancamento(lanc_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM lancamentos WHERE id=?", (lanc_id,))
+    conn.commit()
+    conn.close()
+
+def get_lancamentos():
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM lancamentos ORDER BY data DESC, id DESC", conn)
     conn.close()
     return df
 
-def init_db():
+def get_lancamentos_periodo(start, end):
     conn = get_conn()
-    cur = conn.cursor()
+    df = pd.read_sql_query("""
+        SELECT * FROM lancamentos
+        WHERE date(data) BETWEEN date(?) AND date(?)
+        ORDER BY data DESC, id DESC
+    """, conn, params=(start.isoformat(), end.isoformat()))
+    conn.close()
+    return df
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS contas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        tipo TEXT NOT NULL
-    )
-    """)
+# =========================================================
+# CRUD DIVIDAS / PARCELAMENTOS
+# =========================================================
+def add_divida(descricao, banco, categoria, valor_total, parcelas, data_primeira_parcela, observacao=""):
+    grupo = f"PARC_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    valor_parcela = round(valor_total / parcelas, 2)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS lancamentos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        data TEXT NOT NULL,
-        descricao TEXT NOT NULL,
-        valor REAL NOT NULL,
-        tipo TEXT NOT NULL,
-        categoria TEXT,
-        conta_id INTEGER,
-        forma_pagamento TEXT,
-        observacao TEXT,
-        parcelamento_id INTEGER,
-        parcela_atual INTEGER,
-        total_parcelas INTEGER,
-        FOREIGN KEY (conta_id) REFERENCES contas(id)
-    )
-    """)
+    conn = get_conn()
+    c = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS dividas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        descricao TEXT NOT NULL,
-        valor_total REAL NOT NULL,
-        valor_pago REAL NOT NULL DEFAULT 0,
-        vencimento TEXT,
-        status TEXT NOT NULL DEFAULT 'Aberta',
-        conta_id INTEGER,
-        observacao TEXT,
-        FOREIGN KEY (conta_id) REFERENCES contas(id)
-    )
-    """)
+    c.execute("""
+        INSERT INTO dividas (
+            descricao, banco, categoria, valor_total, parcelas, parcela_atual,
+            valor_parcela, data_primeira_parcela, observacao, grupo_parcelamento
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        descricao, banco, categoria, valor_total, parcelas, 1,
+        valor_parcela, data_primeira_parcela, observacao, grupo
+    ))
+    conn.commit()
+    conn.close()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS parcelamentos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        descricao TEXT NOT NULL,
-        valor_total REAL NOT NULL,
-        valor_parcela REAL NOT NULL,
-        total_parcelas INTEGER NOT NULL,
-        parcelas_lancadas INTEGER NOT NULL DEFAULT 0,
-        data_primeira_parcela TEXT NOT NULL,
-        categoria TEXT,
-        conta_id INTEGER,
-        observacao TEXT,
-        ativo INTEGER NOT NULL DEFAULT 1,
-        FOREIGN KEY (conta_id) REFERENCES contas(id)
-    )
-    """)
+    # Gera parcelas futuras em lançamentos
+    for i in range(parcelas):
+        data_parcela = to_date(data_primeira_parcela) + relativedelta(months=i)
+        desc = f"{descricao} ({i+1}/{parcelas})"
+        add_lancamento(
+            data=data_parcela.isoformat(),
+            descricao=desc,
+            tipo="Despesa",
+            categoria=categoria,
+            banco=banco,
+            valor=valor_parcela,
+            observacao=f"Parcelamento: {descricao}",
+            origem="parcelado",
+            grupo_parcelamento=grupo
+        )
+
+def get_dividas():
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM dividas ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+def update_divida(divida_id, descricao, banco, categoria, valor_total, parcelas, data_primeira_parcela, observacao):
+    """
+    Edita a dívida base.
+    """
+    valor_parcela = round(valor_total / parcelas, 2)
+
+    conn = get_conn()
+    c = conn.cursor()
+
+    # buscar grupo
+    row = c.execute("SELECT grupo_parcelamento FROM dividas WHERE id=?", (divida_id,)).fetchone()
+    if not row:
+        conn.close()
+        return
+
+    grupo = row[0]
+
+    c.execute("""
+        UPDATE dividas
+        SET descricao=?, banco=?, categoria=?, valor_total=?, parcelas=?,
+            valor_parcela=?, data_primeira_parcela=?, observacao=?
+        WHERE id=?
+    """, (
+        descricao, banco, categoria, valor_total, parcelas,
+        valor_parcela, data_primeira_parcela, observacao, divida_id
+    ))
 
     conn.commit()
     conn.close()
 
-    seed_contas()
+def delete_divida(divida_id):
+    conn = get_conn()
+    c = conn.cursor()
 
-def seed_contas():
-    df = fetch_all("SELECT * FROM contas")
-    if df.empty:
-        contas_padrao = [
-            ("Nubank", "Banco"),
-            ("Inter", "Banco"),
-            ("Caixa", "Banco"),
-            ("Cartão Nubank", "Cartão"),
-            ("Cartão Inter", "Cartão")
-        ]
-        for nome, tipo in contas_padrao:
-            execute("INSERT INTO contas (nome, tipo) VALUES (?, ?)", (nome, tipo))
+    row = c.execute("SELECT grupo_parcelamento FROM dividas WHERE id=?", (divida_id,)).fetchone()
+    if row:
+        grupo = row[0]
+        c.execute("DELETE FROM lancamentos WHERE grupo_parcelamento=?", (grupo,))
 
-# =========================================================
-# UTILITÁRIOS
-# =========================================================
-def br_money(v):
-    try:
-        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except:
-        return "R$ 0,00"
+    c.execute("DELETE FROM dividas WHERE id=?", (divida_id,))
+    conn.commit()
+    conn.close()
 
-def to_date_str(d):
-    if isinstance(d, str):
-        return d
-    return d.strftime("%Y-%m-%d")
+def rebuild_parcelamento_completo(divida_id, descricao, banco, categoria, valor_total, parcelas, data_primeira_parcela, observacao):
+    """
+    Edita parcelamento completo:
+    - atualiza dívida
+    - apaga parcelas antigas
+    - recria parcelas futuras
+    """
+    conn = get_conn()
+    c = conn.cursor()
 
-def parse_date(d):
-    if isinstance(d, date):
-        return d
-    return datetime.strptime(d, "%Y-%m-%d").date()
-
-def get_month_range(year, month):
-    start = date(year, month, 1)
-    if month == 12:
-        end = date(year + 1, 1, 1) - relativedelta(days=1)
-    else:
-        end = date(year, month + 1, 1) - relativedelta(days=1)
-    return start, end
-
-def get_contas():
-    return fetch_all("SELECT * FROM contas ORDER BY tipo, nome")
-
-def get_conta_map():
-    contas = get_contas()
-    if contas.empty:
-        return {}
-    return dict(zip(contas["id"], contas["nome"]))
-
-def get_conta_options():
-    contas = get_contas()
-    if contas.empty:
-        return {}
-    return {f"{row['nome']} ({row['tipo']})": row["id"] for _, row in contas.iterrows()}
-
-# =========================================================
-# QUERIES / REPOSITÓRIO
-# =========================================================
-def get_lancamentos():
-    return fetch_all("""
-        SELECT l.*, c.nome as conta_nome, c.tipo as conta_tipo
-        FROM lancamentos l
-        LEFT JOIN contas c ON l.conta_id = c.id
-        ORDER BY date(l.data) DESC, l.id DESC
-    """)
-
-def get_dividas():
-    return fetch_all("""
-        SELECT d.*, c.nome as conta_nome, c.tipo as conta_tipo
-        FROM dividas d
-        LEFT JOIN contas c ON d.conta_id = c.id
-        ORDER BY d.status, date(d.vencimento) ASC
-    """)
-
-def get_parcelamentos():
-    return fetch_all("""
-        SELECT p.*, c.nome as conta_nome, c.tipo as conta_tipo
-        FROM parcelamentos p
-        LEFT JOIN contas c ON p.conta_id = c.id
-        ORDER BY p.ativo DESC, p.id DESC
-    """)
-
-def filtrar_lancamentos(df, filtro_tipo, mes_ano, periodo_inicio, periodo_fim):
-    if df.empty:
-        return df
-
-    df = df.copy()
-    df["data_dt"] = pd.to_datetime(df["data"])
-
-    if filtro_tipo == "Mês":
-        if mes_ano:
-            y, m = map(int, mes_ano.split("-"))
-            inicio, fim = get_month_range(y, m)
-            df = df[(df["data_dt"].dt.date >= inicio) & (df["data_dt"].dt.date <= fim)]
-    elif filtro_tipo == "Período":
-        if periodo_inicio and periodo_fim:
-            df = df[(df["data_dt"].dt.date >= periodo_inicio) & (df["data_dt"].dt.date <= periodo_fim)]
-
-    return df.drop(columns=["data_dt"], errors="ignore")
-
-def gerar_parcelas_futuras(parcelamento_id):
-    p = fetch_all("SELECT * FROM parcelamentos WHERE id = ?", (parcelamento_id,))
-    if p.empty:
+    row = c.execute("SELECT grupo_parcelamento FROM dividas WHERE id=?", (divida_id,)).fetchone()
+    if not row:
+        conn.close()
         return
 
-    p = p.iloc[0]
-    if p["ativo"] != 1:
-        return
+    grupo = row[0]
 
-    # remove parcelas antigas deste parcelamento para recriar tudo limpo
-    execute("DELETE FROM lancamentos WHERE parcelamento_id = ?", (parcelamento_id,))
+    # remove lançamentos antigos do parcelamento
+    c.execute("DELETE FROM lancamentos WHERE grupo_parcelamento=?", (grupo,))
 
-    data_base = parse_date(p["data_primeira_parcela"])
+    valor_parcela = round(valor_total / parcelas, 2)
 
-    for i in range(1, int(p["total_parcelas"]) + 1):
-        data_parcela = data_base + relativedelta(months=i - 1)
-        execute("""
-            INSERT INTO lancamentos (
-                data, descricao, valor, tipo, categoria, conta_id, forma_pagamento,
-                observacao, parcelamento_id, parcela_atual, total_parcelas
-            )
-            VALUES (?, ?, ?, 'Despesa', ?, ?, 'Cartão', ?, ?, ?, ?)
-        """, (
-            to_date_str(data_parcela),
-            p["descricao"],
-            float(p["valor_parcela"]),
-            p["categoria"],
-            int(p["conta_id"]) if pd.notna(p["conta_id"]) else None,
-            p["observacao"],
-            int(parcelamento_id),
-            i,
-            int(p["total_parcelas"])
-        ))
+    c.execute("""
+        UPDATE dividas
+        SET descricao=?, banco=?, categoria=?, valor_total=?, parcelas=?,
+            parcela_atual=1, valor_parcela=?, data_primeira_parcela=?, observacao=?
+        WHERE id=?
+    """, (
+        descricao, banco, categoria, valor_total, parcelas,
+        valor_parcela, data_primeira_parcela, observacao, divida_id
+    ))
 
-    execute("""
-        UPDATE parcelamentos
-        SET parcelas_lancadas = ?
-        WHERE id = ?
-    """, (int(p["total_parcelas"]), parcelamento_id))
+    conn.commit()
+    conn.close()
+
+    # recria parcelas
+    for i in range(parcelas):
+        data_parcela = to_date(data_primeira_parcela) + relativedelta(months=i)
+        desc = f"{descricao} ({i+1}/{parcelas})"
+        add_lancamento(
+            data=data_parcela.isoformat(),
+            descricao=desc,
+            tipo="Despesa",
+            categoria=categoria,
+            banco=banco,
+            valor=valor_parcela,
+            observacao=f"Parcelamento: {descricao}",
+            origem="parcelado",
+            grupo_parcelamento=grupo
+        )
 
 # =========================================================
-# COMPONENTES UI
+# CÁLCULOS
 # =========================================================
-def section_title(title, emoji=""):
-    st.markdown(f"## {emoji} {title}")
+def calc_resumo(df):
+    receitas = df[df["tipo"] == "Receita"]["valor"].sum() if not df.empty else 0
+    despesas = df[df["tipo"] == "Despesa"]["valor"].sum() if not df.empty else 0
+    saldo = receitas - despesas
+    return receitas, despesas, saldo
 
-def metric_card(label, value):
-    st.markdown(f"""
-    <div class="card-metric">
-        <div class="small-label">{label}</div>
-        <div class="big-number">{value}</div>
+def calc_saldo_por_banco(df):
+    if df.empty:
+        return pd.DataFrame(columns=["banco", "receitas", "despesas", "saldo"])
+
+    receitas = df[df["tipo"] == "Receita"].groupby("banco")["valor"].sum().reset_index()
+    receitas.columns = ["banco", "receitas"]
+
+    despesas = df[df["tipo"] == "Despesa"].groupby("banco")["valor"].sum().reset_index()
+    despesas.columns = ["banco", "despesas"]
+
+    merged = pd.merge(receitas, despesas, on="banco", how="outer").fillna(0)
+    merged["saldo"] = merged["receitas"] - merged["despesas"]
+    merged = merged.sort_values("saldo", ascending=False)
+    return merged
+
+def calc_categoria_despesas(df):
+    if df.empty:
+        return pd.DataFrame(columns=["categoria", "valor"])
+    d = df[df["tipo"] == "Despesa"].groupby("categoria")["valor"].sum().reset_index()
+    d = d.sort_values("valor", ascending=False)
+    return d
+
+# =========================================================
+# UI COMPONENTS
+# =========================================================
+def header():
+    st.markdown("""
+    <div class="title-card">
+        <h1 style="margin:0;">💸 Financeiro Pessoal V4 Profissional</h1>
+        <p style="margin:0.35rem 0 0 0; opacity:0.9;">
+            Controle completo de lançamentos, parcelamentos, dívidas e saldos por banco/cartão
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
-# =========================================================
-# FORMS
-# =========================================================
 def form_novo_lancamento():
     with st.expander("➕ Novo lançamento", expanded=False):
-        contas_options = get_conta_options()
-        col1, col2 = st.columns(2)
+        with st.form("form_lancamento"):
+            c1, c2 = st.columns(2)
+            with c1:
+                data_lanc = st.date_input("Data", value=date.today())
+                descricao = st.text_input("Descrição")
+                tipo = st.selectbox("Tipo", TIPOS)
+                categoria = st.selectbox("Categoria", CATEGORIAS)
+            with c2:
+                banco = st.selectbox("Banco/Cartão", BANCOS)
+                valor = st.number_input("Valor", min_value=0.0, step=0.01, format="%.2f")
+                observacao = st.text_area("Observação", height=100)
 
-        with col1:
-            data_l = st.date_input("Data", value=date.today(), key="novo_lanc_data")
-            descricao = st.text_input("Descrição", key="novo_lanc_desc")
-            valor = st.number_input("Valor", min_value=0.0, step=0.01, format="%.2f", key="novo_lanc_valor")
-            tipo = st.selectbox("Tipo", ["Receita", "Despesa"], key="novo_lanc_tipo")
-
-        with col2:
-            categoria = st.text_input("Categoria", key="novo_lanc_cat")
-            conta_nome = st.selectbox("Conta / Banco / Cartão", list(contas_options.keys()), key="novo_lanc_conta")
-            forma = st.selectbox("Forma de pagamento", ["Pix", "Débito", "Crédito", "Dinheiro", "Transferência", "Boleto", "Outro"], key="novo_lanc_forma")
-            observacao = st.text_area("Observação", key="novo_lanc_obs")
-
-        if st.button("Salvar lançamento", use_container_width=True):
-            if not descricao.strip() or valor <= 0:
-                st.warning("Preencha descrição e valor corretamente.")
-            else:
-                conta_id = contas_options.get(conta_nome)
-                execute("""
-                    INSERT INTO lancamentos (
-                        data, descricao, valor, tipo, categoria, conta_id, forma_pagamento, observacao
+            submitted = st.form_submit_button("Salvar lançamento", use_container_width=True)
+            if submitted:
+                if not descricao.strip():
+                    st.warning("Informe a descrição.")
+                elif valor <= 0:
+                    st.warning("Informe um valor maior que zero.")
+                else:
+                    add_lancamento(
+                        data_lanc.isoformat(),
+                        descricao.strip(),
+                        tipo,
+                        categoria,
+                        banco,
+                        float(valor),
+                        observacao.strip()
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    to_date_str(data_l), descricao.strip(), float(valor), tipo, categoria.strip(),
-                    conta_id, forma, observacao.strip()
-                ))
-                st.success("Lançamento salvo com sucesso!")
-                st.rerun()
+                    st.success("Lançamento salvo com sucesso!")
+                    st.rerun()
 
 def form_nova_divida():
-    with st.expander("📌 Nova dívida", expanded=False):
-        contas_options = get_conta_options()
-        col1, col2 = st.columns(2)
+    with st.expander("💳 Nova dívida / parcelamento", expanded=False):
+        with st.form("form_divida"):
+            c1, c2 = st.columns(2)
 
-        with col1:
-            descricao = st.text_input("Descrição da dívida", key="div_desc")
-            valor_total = st.number_input("Valor total", min_value=0.0, step=0.01, format="%.2f", key="div_total")
-            valor_pago = st.number_input("Valor já pago", min_value=0.0, step=0.01, format="%.2f", key="div_pago")
+            with c1:
+                descricao = st.text_input("Descrição da compra / dívida")
+                banco = st.selectbox("Banco/Cartão da dívida", BANCOS, key="div_banco")
+                categoria = st.selectbox("Categoria da dívida", CATEGORIAS, key="div_cat")
 
-        with col2:
-            vencimento = st.date_input("Vencimento", value=date.today(), key="div_venc")
-            conta_nome = st.selectbox("Conta relacionada", list(contas_options.keys()), key="div_conta")
-            observacao = st.text_area("Observação", key="div_obs")
+            with c2:
+                valor_total = st.number_input("Valor total", min_value=0.0, step=0.01, format="%.2f", key="div_valor")
+                parcelas = st.number_input("Quantidade de parcelas", min_value=1, max_value=120, step=1, value=1)
+                data_primeira = st.date_input("Data da 1ª parcela", value=date.today(), key="div_data")
 
-        if st.button("Salvar dívida", use_container_width=True):
-            if not descricao.strip() or valor_total <= 0:
-                st.warning("Preencha a descrição e o valor total.")
-            else:
-                conta_id = contas_options.get(conta_nome)
-                status = "Quitada" if valor_pago >= valor_total else "Aberta"
-                execute("""
-                    INSERT INTO dividas (
-                        descricao, valor_total, valor_pago, vencimento, status, conta_id, observacao
+            observacao = st.text_area("Observação", height=100, key="div_obs")
+
+            submitted = st.form_submit_button("Salvar dívida / parcelamento", use_container_width=True)
+            if submitted:
+                if not descricao.strip():
+                    st.warning("Informe a descrição.")
+                elif valor_total <= 0:
+                    st.warning("Informe um valor total maior que zero.")
+                else:
+                    add_divida(
+                        descricao=descricao.strip(),
+                        banco=banco,
+                        categoria=categoria,
+                        valor_total=float(valor_total),
+                        parcelas=int(parcelas),
+                        data_primeira_parcela=data_primeira.isoformat(),
+                        observacao=observacao.strip()
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    descricao.strip(), float(valor_total), float(valor_pago),
-                    to_date_str(vencimento), status, conta_id, observacao.strip()
-                ))
-                st.success("Dívida salva com sucesso!")
-                st.rerun()
+                    st.success("Dívida/parcelamento salvo com sucesso!")
+                    st.rerun()
 
-def form_novo_parcelamento():
-    with st.expander("💳 Novo parcelamento no cartão", expanded=False):
-        contas = get_contas()
-        cartoes = contas[contas["tipo"] == "Cartão"]
-        if cartoes.empty:
-            st.warning("Cadastre pelo menos uma conta do tipo Cartão.")
-            return
-
-        opcoes_cartao = {f"{row['nome']} ({row['tipo']})": row["id"] for _, row in cartoes.iterrows()}
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            descricao = st.text_input("Descrição da compra parcelada", key="parc_desc")
-            valor_total = st.number_input("Valor total da compra", min_value=0.0, step=0.01, format="%.2f", key="parc_total")
-            total_parcelas = st.number_input("Número de parcelas", min_value=2, step=1, key="parc_n")
-
-        with col2:
-            data_primeira = st.date_input("Data da 1ª parcela", value=date.today(), key="parc_data")
-            categoria = st.text_input("Categoria", key="parc_cat")
-            cartao_nome = st.selectbox("Cartão", list(opcoes_cartao.keys()), key="parc_cartao")
-            observacao = st.text_area("Observação", key="parc_obs")
-
-        if st.button("Salvar parcelamento", use_container_width=True):
-            if not descricao.strip() or valor_total <= 0 or total_parcelas < 2:
-                st.warning("Preencha corretamente os dados do parcelamento.")
-            else:
-                valor_parcela = float(valor_total) / int(total_parcelas)
-                conta_id = opcoes_cartao.get(cartao_nome)
-
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO parcelamentos (
-                        descricao, valor_total, valor_parcela, total_parcelas,
-                        parcelas_lancadas, data_primeira_parcela, categoria, conta_id,
-                        observacao, ativo
-                    )
-                    VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, 1)
-                """, (
-                    descricao.strip(),
-                    float(valor_total),
-                    valor_parcela,
-                    int(total_parcelas),
-                    to_date_str(data_primeira),
-                    categoria.strip(),
-                    conta_id,
-                    observacao.strip()
-                ))
-                parcelamento_id = cur.lastrowid
-                conn.commit()
-                conn.close()
-
-                gerar_parcelas_futuras(parcelamento_id)
-                st.success("Parcelamento salvo com todas as parcelas futuras!")
-                st.rerun()
-
-# =========================================================
-# DASHBOARD
-# =========================================================
-def render_dashboard():
-    section_title("Resumo Financeiro", "📊")
-
-    df = get_lancamentos()
-    if df.empty:
-        st.info("Ainda não há lançamentos cadastrados.")
-        return
-
-    receitas = df[df["tipo"] == "Receita"]["valor"].sum()
-    despesas = df[df["tipo"] == "Despesa"]["valor"].sum()
-    saldo = receitas - despesas
+def render_metricas(df_periodo):
+    receitas, despesas, saldo = calc_resumo(df_periodo)
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        metric_card("Receitas", br_money(receitas))
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("💰 Receitas", br_money(receitas))
+        st.markdown('</div>', unsafe_allow_html=True)
+
     with c2:
-        metric_card("Despesas", br_money(despesas))
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("💸 Despesas", br_money(despesas))
+        st.markdown('</div>', unsafe_allow_html=True)
+
     with c3:
-        metric_card("Saldo", br_money(saldo))
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("📊 Saldo", br_money(saldo))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("### 💳 Saldo por banco/cartão")
+def render_saldo_bancos(df_periodo):
+    st.markdown("### 🏦 Saldo por banco/cartão")
+    saldos = calc_saldo_por_banco(df_periodo)
 
-    if not df.empty:
-        agrupado = df.groupby(["conta_nome", "tipo"])["valor"].sum().reset_index()
-        # saldo por conta: receita positiva, despesa negativa
-        df_aux = df.copy()
-        df_aux["valor_sinal"] = df_aux.apply(lambda x: x["valor"] if x["tipo"] == "Receita" else -x["valor"], axis=1)
-        saldo_conta = df_aux.groupby("conta_nome")["valor_sinal"].sum().reset_index().sort_values("valor_sinal", ascending=False)
-
-        if not saldo_conta.empty:
-            for _, row in saldo_conta.iterrows():
-                st.markdown(f"""
-                <div class="card-light">
-                    <b>{row['conta_nome']}</b><br>
-                    Saldo: <b>{br_money(row['valor_sinal'])}</b>
-                </div>
-                """, unsafe_allow_html=True)
-
-            fig = px.bar(
-                saldo_conta,
-                x="conta_nome",
-                y="valor_sinal",
-                title="Saldo por conta"
-            )
-            fig.update_layout(height=350, margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("### 📈 Despesas por categoria")
-    despesas_df = df[df["tipo"] == "Despesa"]
-    if not despesas_df.empty and despesas_df["categoria"].notna().any():
-        cat = despesas_df.groupby("categoria")["valor"].sum().reset_index()
-        fig = px.pie(cat, names="categoria", values="valor")
-        fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem despesas por categoria para exibir.")
-
-# =========================================================
-# LANÇAMENTOS
-# =========================================================
-def render_lancamentos():
-    section_title("Lançamentos", "🧾")
-
-    form_novo_lancamento()
-
-    df = get_lancamentos()
-    if df.empty:
-        st.info("Nenhum lançamento cadastrado.")
+    if saldos.empty:
+        st.info("Sem dados no período para exibir saldos por banco/cartão.")
         return
 
-    st.markdown("### 🔎 Filtros")
-    c1, c2, c3 = st.columns([1,1,1])
-
-    with c1:
-        filtro_tipo = st.selectbox("Filtrar por", ["Todos", "Mês", "Período"], key="filtro_lanc_tipo")
-
-    mes_ano = None
-    periodo_inicio = None
-    periodo_fim = None
-
-    with c2:
-        if filtro_tipo == "Mês":
-            hoje = date.today()
-            mes_ano = st.text_input("Mês (YYYY-MM)", value=hoje.strftime("%Y-%m"), key="filtro_mes")
-        elif filtro_tipo == "Período":
-            periodo_inicio = st.date_input("Data inicial", value=date.today().replace(day=1), key="filtro_inicio")
-
-    with c3:
-        if filtro_tipo == "Período":
-            periodo_fim = st.date_input("Data final", value=date.today(), key="filtro_fim")
-
-    df_filtrado = filtrar_lancamentos(df, filtro_tipo, mes_ano, periodo_inicio, periodo_fim)
-
-    receitas = df_filtrado[df_filtrado["tipo"] == "Receita"]["valor"].sum()
-    despesas = df_filtrado[df_filtrado["tipo"] == "Despesa"]["valor"].sum()
-    saldo = receitas - despesas
-
-    mc1, mc2, mc3 = st.columns(3)
-    with mc1:
-        metric_card("Receitas filtradas", br_money(receitas))
-    with mc2:
-        metric_card("Despesas filtradas", br_money(despesas))
-    with mc3:
-        metric_card("Saldo filtrado", br_money(saldo))
-
-    st.markdown("### 📋 Lista de lançamentos")
-
-    contas_options = get_conta_options()
-    conta_reverse = {v: k for k, v in contas_options.items()}
-
-    for _, row in df_filtrado.iterrows():
+    for _, row in saldos.iterrows():
         with st.container():
-            c1, c2 = st.columns([6, 1])
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            c1, c2, c3, c4 = st.columns([2.2, 1, 1, 1])
+            c1.markdown(f"**{row['banco']}**")
+            c2.markdown(f"Receitas: **{br_money(row['receitas'])}**")
+            c3.markdown(f"Despesas: **{br_money(row['despesas'])}**")
+            c4.markdown(f"Saldo: **{br_money(row['saldo'])}**")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-            with c1:
-                parcela_txt = ""
-                if pd.notna(row["parcelamento_id"]) and pd.notna(row["parcela_atual"]) and pd.notna(row["total_parcelas"]):
-                    parcela_txt = f" | Parcela {int(row['parcela_atual'])}/{int(row['total_parcelas'])}"
+def render_lancamentos(df_periodo):
+    st.markdown("### 📋 Lançamentos do período")
 
-                st.markdown(f"""
-                <div class="launch-card">
-                    <b>{row['descricao']}</b><br>
-                    {row['data']} | {row['tipo']} | <b>{br_money(row['valor'])}</b><br>
-                    Categoria: {row['categoria'] if pd.notna(row['categoria']) else '-'}<br>
-                    Conta: {row['conta_nome'] if pd.notna(row['conta_nome']) else '-'}{parcela_txt}
-                </div>
-                """, unsafe_allow_html=True)
+    if df_periodo.empty:
+        st.info("Nenhum lançamento encontrado no período.")
+        return
 
-            with c2:
-                if st.button("✏️", key=f"edit_lanc_btn_{row['id']}", use_container_width=True):
-                    st.session_state[f"edit_lanc_open_{row['id']}"] = not st.session_state.get(f"edit_lanc_open_{row['id']}", False)
+    for _, row in df_periodo.iterrows():
+        lanc_id = int(row["id"])
+        edit_key = f"edit_lanc_{lanc_id}"
 
-            if st.session_state.get(f"edit_lanc_open_{row['id']}", False):
-                with st.expander(f"Editar lançamento #{row['id']}", expanded=True):
-                    colA, colB = st.columns(2)
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = False
 
-                    with colA:
-                        nova_data = st.date_input(
-                            "Data",
-                            value=parse_date(row["data"]),
-                            key=f"el_data_{row['id']}"
+        st.markdown('<div class="launch-row">', unsafe_allow_html=True)
+        c1, c2, c3 = st.columns([7, 1, 1])
+
+        with c1:
+            st.markdown(
+                f"**{row['descricao']}**  \n"
+                f"<span class='small-muted'>{row['data']} • {row['tipo']} • {row['categoria']} • {row['banco']}</span>  \n"
+                f"**{br_money(row['valor'])}**",
+                unsafe_allow_html=True
+            )
+
+        with c2:
+            if st.button("✏️", key=f"btn_edit_l_{lanc_id}", use_container_width=True):
+                st.session_state[edit_key] = not st.session_state[edit_key]
+
+        with c3:
+            if st.button("🗑️", key=f"btn_del_l_{lanc_id}", use_container_width=True):
+                delete_lancamento(lanc_id)
+                st.success("Lançamento excluído.")
+                st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.session_state[edit_key]:
+            with st.expander(f"Editar lançamento #{lanc_id}", expanded=True):
+                with st.form(f"form_edit_l_{lanc_id}"):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        nova_data = st.date_input("Data", value=to_date(row["data"]), key=f"ed_data_{lanc_id}")
+                        nova_desc = st.text_input("Descrição", value=row["descricao"], key=f"ed_desc_{lanc_id}")
+                        novo_tipo = st.selectbox("Tipo", TIPOS, index=TIPOS.index(row["tipo"]), key=f"ed_tipo_{lanc_id}")
+                        nova_cat = st.selectbox("Categoria", CATEGORIAS, index=CATEGORIAS.index(row["categoria"]) if row["categoria"] in CATEGORIAS else len(CATEGORIAS)-1, key=f"ed_cat_{lanc_id}")
+                    with ec2:
+                        novo_banco = st.selectbox("Banco", BANCOS, index=BANCOS.index(row["banco"]) if row["banco"] in BANCOS else 0, key=f"ed_banco_{lanc_id}")
+                        novo_valor = st.number_input("Valor", min_value=0.0, value=float(row["valor"]), step=0.01, format="%.2f", key=f"ed_valor_{lanc_id}")
+                        nova_obs = st.text_area("Observação", value=row["observacao"] if pd.notna(row["observacao"]) else "", key=f"ed_obs_{lanc_id}")
+
+                    s1, s2 = st.columns(2)
+                    with s1:
+                        salvar = st.form_submit_button("Salvar alterações", use_container_width=True)
+                    with s2:
+                        cancelar = st.form_submit_button("Cancelar", use_container_width=True)
+
+                    if salvar:
+                        update_lancamento(
+                            lanc_id=lanc_id,
+                            data=nova_data.isoformat(),
+                            descricao=nova_desc.strip(),
+                            tipo=novo_tipo,
+                            categoria=nova_cat,
+                            banco=novo_banco,
+                            valor=float(novo_valor),
+                            observacao=nova_obs.strip()
                         )
-                        nova_desc = st.text_input(
-                            "Descrição",
-                            value=row["descricao"],
-                            key=f"el_desc_{row['id']}"
-                        )
-                        novo_valor = st.number_input(
-                            "Valor",
-                            min_value=0.0,
-                            step=0.01,
-                            format="%.2f",
-                            value=float(row["valor"]),
-                            key=f"el_valor_{row['id']}"
-                        )
+                        st.session_state[edit_key] = False
+                        st.success("Lançamento atualizado.")
+                        st.rerun()
 
-                    with colB:
-                        novo_tipo = st.selectbox(
-                            "Tipo",
-                            ["Receita", "Despesa"],
-                            index=0 if row["tipo"] == "Receita" else 1,
-                            key=f"el_tipo_{row['id']}"
-                        )
-                        nova_cat = st.text_input(
-                            "Categoria",
-                            value=row["categoria"] if pd.notna(row["categoria"]) else "",
-                            key=f"el_cat_{row['id']}"
-                        )
-                        conta_atual_label = conta_reverse.get(row["conta_id"], list(contas_options.keys())[0] if contas_options else None)
-                        nova_conta = st.selectbox(
-                            "Conta",
-                            list(contas_options.keys()),
-                            index=list(contas_options.keys()).index(conta_atual_label) if conta_atual_label in list(contas_options.keys()) else 0,
-                            key=f"el_conta_{row['id']}"
-                        )
+                    if cancelar:
+                        st.session_state[edit_key] = False
+                        st.rerun()
 
-                    nova_forma = st.selectbox(
-                        "Forma de pagamento",
-                        ["Pix", "Débito", "Crédito", "Dinheiro", "Transferência", "Boleto", "Outro"],
-                        index=["Pix", "Débito", "Crédito", "Dinheiro", "Transferência", "Boleto", "Outro"].index(row["forma_pagamento"]) if row["forma_pagamento"] in ["Pix", "Débito", "Crédito", "Dinheiro", "Transferência", "Boleto", "Outro"] else 0,
-                        key=f"el_forma_{row['id']}"
-                    )
-                    nova_obs = st.text_area(
-                        "Observação",
-                        value=row["observacao"] if pd.notna(row["observacao"]) else "",
-                        key=f"el_obs_{row['id']}"
-                    )
-
-                    b1, b2 = st.columns(2)
-
-                    with b1:
-                        if st.button("💾 Salvar", key=f"save_lanc_{row['id']}", use_container_width=True):
-                            execute("""
-                                UPDATE lancamentos
-                                SET data = ?, descricao = ?, valor = ?, tipo = ?, categoria = ?, conta_id = ?, forma_pagamento = ?, observacao = ?
-                                WHERE id = ?
-                            """, (
-                                to_date_str(nova_data), nova_desc.strip(), float(novo_valor), novo_tipo,
-                                nova_cat.strip(), contas_options.get(nova_conta), nova_forma, nova_obs.strip(), int(row["id"])
-                            ))
-                            st.success("Lançamento atualizado!")
-                            st.rerun()
-
-                    with b2:
-                        if st.button("🗑️ Excluir", key=f"del_lanc_{row['id']}", use_container_width=True):
-                            execute("DELETE FROM lancamentos WHERE id = ?", (int(row["id"]),))
-                            st.success("Lançamento excluído!")
-                            st.rerun()
-
-# =========================================================
-# DÍVIDAS
-# =========================================================
 def render_dividas():
-    section_title("Dívidas", "📌")
-
-    form_nova_divida()
+    st.markdown("### 💳 Dívidas / Parcelamentos")
 
     df = get_dividas()
     if df.empty:
-        st.info("Nenhuma dívida cadastrada.")
+        st.info("Nenhuma dívida/parcelamento cadastrado.")
         return
 
-    contas_options = get_conta_options()
-    conta_reverse = {v: k for k, v in contas_options.items()}
-
     for _, row in df.iterrows():
-        restante = float(row["valor_total"]) - float(row["valor_pago"])
+        div_id = int(row["id"])
+        edit_key = f"edit_div_{div_id}"
+        rebuild_key = f"rebuild_div_{div_id}"
 
-        c1, c2 = st.columns([6, 1])
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = False
+        if rebuild_key not in st.session_state:
+            st.session_state[rebuild_key] = False
+
+        parcelas = int(row["parcelas"])
+        valor_total = float(row["valor_total"])
+        valor_parcela = float(row["valor_parcela"])
+
+        st.markdown('<div class="launch-row">', unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns([6, 1, 1, 1])
 
         with c1:
-            st.markdown(f"""
-            <div class="launch-card">
-                <b>{row['descricao']}</b><br>
-                Total: <b>{br_money(row['valor_total'])}</b> | Pago: <b>{br_money(row['valor_pago'])}</b> | Restante: <b>{br_money(restante)}</b><br>
-                Vencimento: {row['vencimento'] if pd.notna(row['vencimento']) else '-'} | Status: <b>{row['status']}</b><br>
-                Conta: {row['conta_nome'] if pd.notna(row['conta_nome']) else '-'}
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f"**{row['descricao']}**  \n"
+                f"<span class='small-muted'>{row['banco']} • {row['categoria']} • {parcelas}x de {br_money(valor_parcela)}</span>  \n"
+                f"**Total: {br_money(valor_total)}**",
+                unsafe_allow_html=True
+            )
 
         with c2:
-            if st.button("✏️", key=f"edit_div_btn_{row['id']}", use_container_width=True):
-                st.session_state[f"edit_div_open_{row['id']}"] = not st.session_state.get(f"edit_div_open_{row['id']}", False)
+            if st.button("✏️", key=f"btn_edit_d_{div_id}", use_container_width=True):
+                st.session_state[edit_key] = not st.session_state[edit_key]
 
-        if st.session_state.get(f"edit_div_open_{row['id']}", False):
-            with st.expander(f"Editar dívida #{row['id']}", expanded=True):
-                colA, colB = st.columns(2)
+        with c3:
+            if st.button("🔁", key=f"btn_rebuild_d_{div_id}", use_container_width=True):
+                st.session_state[rebuild_key] = not st.session_state[rebuild_key]
 
-                with colA:
-                    nova_desc = st.text_input("Descrição", value=row["descricao"], key=f"ed_desc_{row['id']}")
-                    novo_total = st.number_input("Valor total", min_value=0.0, step=0.01, format="%.2f", value=float(row["valor_total"]), key=f"ed_total_{row['id']}")
-                    novo_pago = st.number_input("Valor pago", min_value=0.0, step=0.01, format="%.2f", value=float(row["valor_pago"]), key=f"ed_pago_{row['id']}")
+        with c4:
+            if st.button("🗑️", key=f"btn_del_d_{div_id}", use_container_width=True):
+                delete_divida(div_id)
+                st.success("Dívida/parcelamento excluído (incluindo parcelas futuras).")
+                st.rerun()
 
-                with colB:
-                    novo_venc = st.date_input("Vencimento", value=parse_date(row["vencimento"]) if pd.notna(row["vencimento"]) else date.today(), key=f"ed_venc_{row['id']}")
-                    conta_atual_label = conta_reverse.get(row["conta_id"], list(contas_options.keys())[0] if contas_options else None)
-                    nova_conta = st.selectbox(
-                        "Conta",
-                        list(contas_options.keys()),
-                        index=list(contas_options.keys()).index(conta_atual_label) if conta_atual_label in list(contas_options.keys()) else 0,
-                        key=f"ed_conta_{row['id']}"
-                    )
-                    nova_obs = st.text_area("Observação", value=row["observacao"] if pd.notna(row["observacao"]) else "", key=f"ed_obs_{row['id']}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-                novo_status = "Quitada" if novo_pago >= novo_total and novo_total > 0 else "Aberta"
+        # Edita somente o registro da dívida
+        if st.session_state[edit_key]:
+            with st.expander(f"Editar dívida #{div_id}", expanded=True):
+                with st.form(f"form_edit_d_{div_id}"):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        nova_desc = st.text_input("Descrição", value=row["descricao"], key=f"div_desc_{div_id}")
+                        novo_banco = st.selectbox("Banco", BANCOS, index=BANCOS.index(row["banco"]) if row["banco"] in BANCOS else 0, key=f"div_banco_{div_id}")
+                        nova_cat = st.selectbox("Categoria", CATEGORIAS, index=CATEGORIAS.index(row["categoria"]) if row["categoria"] in CATEGORIAS else len(CATEGORIAS)-1, key=f"div_cat_{div_id}")
+                    with ec2:
+                        novo_total = st.number_input("Valor total", min_value=0.0, value=float(row["valor_total"]), step=0.01, format="%.2f", key=f"div_total_{div_id}")
+                        novas_parcelas = st.number_input("Parcelas", min_value=1, max_value=120, value=int(row["parcelas"]), step=1, key=f"div_parc_{div_id}")
+                        nova_data = st.date_input("1ª parcela", value=to_date(row["data_primeira_parcela"]), key=f"div_data_{div_id}")
 
-                b1, b2 = st.columns(2)
+                    nova_obs = st.text_area("Observação", value=row["observacao"] if pd.notna(row["observacao"]) else "", key=f"div_obs_{div_id}")
 
-                with b1:
-                    if st.button("💾 Salvar", key=f"save_div_{row['id']}", use_container_width=True):
-                        execute("""
-                            UPDATE dividas
-                            SET descricao = ?, valor_total = ?, valor_pago = ?, vencimento = ?, status = ?, conta_id = ?, observacao = ?
-                            WHERE id = ?
-                        """, (
-                            nova_desc.strip(), float(novo_total), float(novo_pago), to_date_str(novo_venc),
-                            novo_status, contas_options.get(nova_conta), nova_obs.strip(), int(row["id"])
-                        ))
-                        st.success("Dívida atualizada!")
+                    s1, s2 = st.columns(2)
+                    with s1:
+                        salvar = st.form_submit_button("Salvar dívida", use_container_width=True)
+                    with s2:
+                        cancelar = st.form_submit_button("Cancelar", use_container_width=True)
+
+                    if salvar:
+                        update_divida(
+                            divida_id=div_id,
+                            descricao=nova_desc.strip(),
+                            banco=novo_banco,
+                            categoria=nova_cat,
+                            valor_total=float(novo_total),
+                            parcelas=int(novas_parcelas),
+                            data_primeira_parcela=nova_data.isoformat(),
+                            observacao=nova_obs.strip()
+                        )
+                        st.session_state[edit_key] = False
+                        st.success("Dívida atualizada (sem recriar parcelas).")
                         st.rerun()
 
-                with b2:
-                    if st.button("🗑️ Excluir", key=f"del_div_{row['id']}", use_container_width=True):
-                        execute("DELETE FROM dividas WHERE id = ?", (int(row["id"]),))
-                        st.success("Dívida excluída!")
+                    if cancelar:
+                        st.session_state[edit_key] = False
                         st.rerun()
 
-# =========================================================
-# PARCELAMENTOS
-# =========================================================
-def render_parcelamentos():
-    section_title("Parcelamentos", "💳")
+        # Recria parcelamento inteiro
+        if st.session_state[rebuild_key]:
+            with st.expander(f"Editar parcelamento completo #{div_id}", expanded=True):
+                st.warning("⚠️ Isso apaga as parcelas antigas e recria todas do zero.")
+                with st.form(f"form_rebuild_d_{div_id}"):
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        nova_desc = st.text_input("Descrição", value=row["descricao"], key=f"rb_desc_{div_id}")
+                        novo_banco = st.selectbox("Banco", BANCOS, index=BANCOS.index(row["banco"]) if row["banco"] in BANCOS else 0, key=f"rb_banco_{div_id}")
+                        nova_cat = st.selectbox("Categoria", CATEGORIAS, index=CATEGORIAS.index(row["categoria"]) if row["categoria"] in CATEGORIAS else len(CATEGORIAS)-1, key=f"rb_cat_{div_id}")
+                    with ec2:
+                        novo_total = st.number_input("Valor total", min_value=0.0, value=float(row["valor_total"]), step=0.01, format="%.2f", key=f"rb_total_{div_id}")
+                        novas_parcelas = st.number_input("Parcelas", min_value=1, max_value=120, value=int(row["parcelas"]), step=1, key=f"rb_parc_{div_id}")
+                        nova_data = st.date_input("1ª parcela", value=to_date(row["data_primeira_parcela"]), key=f"rb_data_{div_id}")
 
-    form_novo_parcelamento()
+                    nova_obs = st.text_area("Observação", value=row["observacao"] if pd.notna(row["observacao"]) else "", key=f"rb_obs_{div_id}")
 
-    df = get_parcelamentos()
-    if df.empty:
-        st.info("Nenhum parcelamento cadastrado.")
+                    s1, s2 = st.columns(2)
+                    with s1:
+                        salvar = st.form_submit_button("Recriar parcelamento completo", use_container_width=True)
+                    with s2:
+                        cancelar = st.form_submit_button("Cancelar", use_container_width=True)
+
+                    if salvar:
+                        rebuild_parcelamento_completo(
+                            divida_id=div_id,
+                            descricao=nova_desc.strip(),
+                            banco=novo_banco,
+                            categoria=nova_cat,
+                            valor_total=float(novo_total),
+                            parcelas=int(novas_parcelas),
+                            data_primeira_parcela=nova_data.isoformat(),
+                            observacao=nova_obs.strip()
+                        )
+                        st.session_state[rebuild_key] = False
+                        st.success("Parcelamento recriado com sucesso.")
+                        st.rerun()
+
+                    if cancelar:
+                        st.session_state[rebuild_key] = False
+                        st.rerun()
+
+def render_categoria_despesas(df_periodo):
+    st.markdown("### 📊 Despesas por categoria")
+    cat_df = calc_categoria_despesas(df_periodo)
+
+    if cat_df.empty:
+        st.info("Sem despesas no período.")
         return
 
-    contas = get_contas()
-    cartoes = contas[contas["tipo"] == "Cartão"]
-    opcoes_cartao = {f"{row['nome']} ({row['tipo']})": row["id"] for _, row in cartoes.iterrows()}
-    cartao_reverse = {v: k for k, v in opcoes_cartao.items()}
+    chart_df = cat_df.set_index("categoria")
+    st.bar_chart(chart_df["valor"])
 
-    for _, row in df.iterrows():
-        restantes = int(row["total_parcelas"]) - int(row["parcelas_lancadas"])
-        status = "Ativo" if int(row["ativo"]) == 1 else "Encerrado"
-
-        c1, c2 = st.columns([6, 1])
-
-        with c1:
-            st.markdown(f"""
-            <div class="launch-card">
-                <b>{row['descricao']}</b><br>
-                Total: <b>{br_money(row['valor_total'])}</b> | Parcela: <b>{br_money(row['valor_parcela'])}</b><br>
-                Parcelas: <b>{int(row['total_parcelas'])}</b> | Lançadas: <b>{int(row['parcelas_lancadas'])}</b> | Restantes: <b>{restantes if restantes > 0 else 0}</b><br>
-                Cartão: {row['conta_nome'] if pd.notna(row['conta_nome']) else '-'} | Status: <b>{status}</b>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with c2:
-            if st.button("✏️", key=f"edit_parc_btn_{row['id']}", use_container_width=True):
-                st.session_state[f"edit_parc_open_{row['id']}"] = not st.session_state.get(f"edit_parc_open_{row['id']}", False)
-
-        if st.session_state.get(f"edit_parc_open_{row['id']}", False):
-            with st.expander(f"Editar parcelamento #{row['id']}", expanded=True):
-                colA, colB = st.columns(2)
-
-                with colA:
-                    nova_desc = st.text_input("Descrição", value=row["descricao"], key=f"ep_desc_{row['id']}")
-                    novo_total = st.number_input("Valor total", min_value=0.0, step=0.01, format="%.2f", value=float(row["valor_total"]), key=f"ep_total_{row['id']}")
-                    novo_n = st.number_input("Total de parcelas", min_value=2, step=1, value=int(row["total_parcelas"]), key=f"ep_n_{row['id']}")
-
-                with colB:
-                    nova_data = st.date_input("Data da 1ª parcela", value=parse_date(row["data_primeira_parcela"]), key=f"ep_data_{row['id']}")
-                    nova_cat = st.text_input("Categoria", value=row["categoria"] if pd.notna(row["categoria"]) else "", key=f"ep_cat_{row['id']}")
-                    cartao_atual = cartao_reverse.get(row["conta_id"], list(opcoes_cartao.keys())[0] if opcoes_cartao else None)
-                    novo_cartao = st.selectbox(
-                        "Cartão",
-                        list(opcoes_cartao.keys()),
-                        index=list(opcoes_cartao.keys()).index(cartao_atual) if cartao_atual in list(opcoes_cartao.keys()) else 0,
-                        key=f"ep_cartao_{row['id']}"
-                    )
-
-                nova_obs = st.text_area("Observação", value=row["observacao"] if pd.notna(row["observacao"]) else "", key=f"ep_obs_{row['id']}")
-                novo_ativo = st.selectbox("Status", ["Ativo", "Encerrado"], index=0 if int(row["ativo"]) == 1 else 1, key=f"ep_status_{row['id']}")
-
-                st.warning("Ao salvar, o app recria TODAS as parcelas desse parcelamento. Isso é ideal para corrigir parcelamento completo.")
-
-                b1, b2, b3 = st.columns(3)
-
-                with b1:
-                    if st.button("💾 Salvar e recriar parcelas", key=f"save_parc_{row['id']}", use_container_width=True):
-                        valor_parcela = float(novo_total) / int(novo_n)
-                        ativo_int = 1 if novo_ativo == "Ativo" else 0
-
-                        execute("""
-                            UPDATE parcelamentos
-                            SET descricao = ?, valor_total = ?, valor_parcela = ?, total_parcelas = ?,
-                                parcelas_lancadas = 0, data_primeira_parcela = ?, categoria = ?, conta_id = ?,
-                                observacao = ?, ativo = ?
-                            WHERE id = ?
-                        """, (
-                            nova_desc.strip(), float(novo_total), valor_parcela, int(novo_n),
-                            to_date_str(nova_data), nova_cat.strip(), opcoes_cartao.get(novo_cartao),
-                            nova_obs.strip(), ativo_int, int(row["id"])
-                        ))
-
-                        if ativo_int == 1:
-                            gerar_parcelas_futuras(int(row["id"]))
-                        else:
-                            execute("DELETE FROM lancamentos WHERE parcelamento_id = ?", (int(row["id"]),))
-
-                        st.success("Parcelamento atualizado com sucesso!")
-                        st.rerun()
-
-                with b2:
-                    if st.button("⛔ Encerrar", key=f"encerrar_parc_{row['id']}", use_container_width=True):
-                        execute("UPDATE parcelamentos SET ativo = 0 WHERE id = ?", (int(row["id"]),))
-                        st.success("Parcelamento encerrado!")
-                        st.rerun()
-
-                with b3:
-                    if st.button("🗑️ Excluir", key=f"del_parc_{row['id']}", use_container_width=True):
-                        execute("DELETE FROM lancamentos WHERE parcelamento_id = ?", (int(row["id"]),))
-                        execute("DELETE FROM parcelamentos WHERE id = ?", (int(row["id"]),))
-                        st.success("Parcelamento excluído!")
-                        st.rerun()
+    st.dataframe(
+        cat_df.assign(valor=cat_df["valor"].apply(br_money)),
+        use_container_width=True,
+        hide_index=True
+    )
 
 # =========================================================
-# MAIN APP
+# APP
 # =========================================================
 def main():
     init_db()
+    header()
 
-    st.title("💰 Financeiro Pessoal V3 Final")
-    st.caption("Controle financeiro com lançamentos, dívidas, parcelamentos e visão por banco/cartão.")
+    # Sidebar
+    st.sidebar.title("⚙️ Navegação")
+    page = st.sidebar.radio(
+        "Ir para:",
+        ["Dashboard", "Lançamentos", "Dívidas / Parcelamentos"]
+    )
 
-    tabs = st.tabs([
-        "📊 Dashboard",
-        "🧾 Lançamentos",
-        "📌 Dívidas",
-        "💳 Parcelamentos"
-    ])
+    if page == "Dashboard":
+        start, end = get_period_filter()
+        if not start or not end:
+            return
 
-    with tabs[0]:
-        render_dashboard()
+        df_periodo = get_lancamentos_periodo(start, end)
 
-    with tabs[1]:
-        render_lancamentos()
+        st.markdown(f"#### Período selecionado: **{start.strftime('%d/%m/%Y')}** até **{end.strftime('%d/%m/%Y')}**")
+        render_metricas(df_periodo)
+        st.markdown("---")
+        render_saldo_bancos(df_periodo)
+        st.markdown("---")
+        render_categoria_despesas(df_periodo)
+        st.markdown("---")
+        render_lancamentos(df_periodo)
 
-    with tabs[2]:
+    elif page == "Lançamentos":
+        form_novo_lancamento()
+        st.markdown("---")
+        start, end = get_period_filter()
+        if not start or not end:
+            return
+        df_periodo = get_lancamentos_periodo(start, end)
+        render_metricas(df_periodo)
+        st.markdown("---")
+        render_lancamentos(df_periodo)
+
+    elif page == "Dívidas / Parcelamentos":
+        form_nova_divida()
+        st.markdown("---")
         render_dividas()
-
-    with tabs[3]:
-        render_parcelamentos()
 
 if __name__ == "__main__":
     main()
