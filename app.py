@@ -3,13 +3,14 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
+import calendar
 
 # =========================================================
 # CONFIGURAÇÃO E ESTILO
 # =========================================================
-st.set_page_config(page_title="Finanças Pro", page_icon="💸", layout="wide")
+st.set_page_config(page_title="Finanças Pro V6", page_icon="💸", layout="wide")
 
-DB_NAME = "financeiro_pro_v5_1.db"
+DB_NAME = "financeiro_pro_v6.db"
 BANCOS = ["Banco do Brasil", "Banrisul", "Nubank", "Itaú", "Flash (VA)"]
 CATEGORIAS = [
     "Salário", "Alimentação", "Mercado", "Transporte", "Moradia",
@@ -30,6 +31,7 @@ st.markdown("""
     .status-pago { color: #059669; font-weight: bold; }
     .status-pendente { color: #ea580c; font-weight: bold; }
     .status-atrasado { color: #dc2626; font-weight: bold; }
+
     .saldo-positivo {
         padding: 12px;
         border-radius: 10px;
@@ -60,8 +62,18 @@ st.markdown("""
         color: #334155;
         margin-bottom: 8px;
     }
-    .stButton>button { width: 100%; border-radius: 8px; }
+
+    .origem-manual {
+        color: #1d4ed8;
+        font-weight: 600;
+    }
+    .origem-fixa {
+        color: #7c3aed;
+        font-weight: 600;
+    }
+
     .small-text { font-size: 0.85rem; color: #64748b; }
+    .stButton>button { border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -75,7 +87,7 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    # Lançamentos REAIS (afetam saldo)
+    # Lançamentos REAIS
     c.execute("""
         CREATE TABLE IF NOT EXISTS lancamentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +100,7 @@ def init_db():
         )
     """)
 
-    # Contas PREVISTAS / DÍVIDAS
+    # Contas previstas / mensais (manuais ou geradas por fixa)
     c.execute("""
         CREATE TABLE IF NOT EXISTS contas_previstas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,11 +110,26 @@ def init_db():
             data_vencimento TEXT,
             status TEXT DEFAULT 'Pendente',
             banco_pagamento TEXT,
-            data_pagamento TEXT
+            data_pagamento TEXT,
+            origem TEXT DEFAULT 'Manual',
+            fixa_id INTEGER
         )
     """)
 
-    # Orçamentos (Metas)
+    # Contas fixas (modelo)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS contas_fixas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            descricao TEXT,
+            categoria TEXT,
+            valor REAL,
+            dia_vencimento INTEGER,
+            data_inicio TEXT,
+            ativa INTEGER DEFAULT 1
+        )
+    """)
+
+    # Orçamentos
     c.execute("""
         CREATE TABLE IF NOT EXISTS orcamentos (
             categoria TEXT PRIMARY KEY,
@@ -112,21 +139,26 @@ def init_db():
 
     conn.commit()
 
-    # Migração simples (caso venha de versões anteriores)
-    try:
-        c.execute("ALTER TABLE contas_previstas ADD COLUMN banco_pagamento TEXT")
-        conn.commit()
-    except:
-        pass
+    # Migrações simples
+    migracoes = [
+        "ALTER TABLE contas_previstas ADD COLUMN banco_pagamento TEXT",
+        "ALTER TABLE contas_previstas ADD COLUMN data_pagamento TEXT",
+        "ALTER TABLE contas_previstas ADD COLUMN origem TEXT DEFAULT 'Manual'",
+        "ALTER TABLE contas_previstas ADD COLUMN fixa_id INTEGER"
+    ]
 
-    try:
-        c.execute("ALTER TABLE contas_previstas ADD COLUMN data_pagamento TEXT")
-        conn.commit()
-    except:
-        pass
+    for sql in migracoes:
+        try:
+            c.execute(sql)
+            conn.commit()
+        except:
+            pass
 
     conn.close()
 
+# =========================================================
+# DB HELPERS
+# =========================================================
 def db_execute(query, params=()):
     conn = get_conn()
     c = conn.cursor()
@@ -140,6 +172,13 @@ def db_fetch_df(query, params=()):
     conn.close()
     return df
 
+def db_fetch_one(query, params=()):
+    conn = get_conn()
+    c = conn.cursor()
+    row = c.execute(query, params).fetchone()
+    conn.close()
+    return row
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -152,10 +191,7 @@ def calcular_saldo_por_banco(df_lan, banco):
     return receitas - despesas
 
 def calcular_saldos(df_lan):
-    saldos = {}
-    for banco in BANCOS:
-        saldos[banco] = calcular_saldo_por_banco(df_lan, banco)
-    return saldos
+    return {banco: calcular_saldo_por_banco(df_lan, banco) for banco in BANCOS}
 
 def status_conta(data_vencimento_str, status):
     if status == "Pago":
@@ -165,8 +201,70 @@ def status_conta(data_vencimento_str, status):
         return "Atrasado"
     return "Pendente"
 
+def data_valida_mes(ano, mes, dia):
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    dia_ajustado = min(dia, ultimo_dia)
+    return date(ano, mes, dia_ajustado)
+
 # =========================================================
-# LÓGICA DE NEGÓCIO
+# GERAÇÃO AUTOMÁTICA DE CONTAS FIXAS
+# =========================================================
+def gerar_contas_fixas_automaticamente():
+    """
+    Gera contas mensais para:
+    - mês atual
+    - mês anterior
+    - próximo mês
+    Isso ajuda a manter a lista sempre pronta e evita duplicação.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+
+    fixas = c.execute("""
+        SELECT id, descricao, categoria, valor, dia_vencimento, data_inicio, ativa
+        FROM contas_fixas
+        WHERE ativa = 1
+    """).fetchall()
+
+    hoje = date.today()
+    meses_para_gerar = [
+        (hoje - relativedelta(months=1)).replace(day=1),
+        hoje.replace(day=1),
+        (hoje + relativedelta(months=1)).replace(day=1),
+    ]
+
+    for fixa in fixas:
+        fixa_id, desc, cat, valor, dia_venc, data_inicio_str, ativa = fixa
+        data_inicio = datetime.strptime(data_inicio_str, "%Y-%m-%d").date()
+
+        for base_mes in meses_para_gerar:
+            if base_mes < data_inicio.replace(day=1):
+                continue
+
+            venc = data_valida_mes(base_mes.year, base_mes.month, dia_venc)
+            venc_str = venc.isoformat()
+
+            # verifica se já existe conta gerada para essa fixa nesse mês
+            existe = c.execute("""
+                SELECT id FROM contas_previstas
+                WHERE fixa_id = ?
+                  AND strftime('%Y-%m', data_vencimento) = strftime('%Y-%m', ?)
+            """, (fixa_id, venc_str)).fetchone()
+
+            if not existe:
+                c.execute("""
+                    INSERT INTO contas_previstas (
+                        descricao, categoria, valor, data_vencimento,
+                        status, origem, fixa_id
+                    )
+                    VALUES (?, ?, ?, ?, 'Pendente', 'Fixa', ?)
+                """, (desc, cat, valor, venc_str, fixa_id))
+
+    conn.commit()
+    conn.close()
+
+# =========================================================
+# REGRAS DE NEGÓCIO
 # =========================================================
 def pagar_conta(id_conta, banco, data_pagamento):
     conn = get_conn()
@@ -175,7 +273,7 @@ def pagar_conta(id_conta, banco, data_pagamento):
     conta = c.execute("""
         SELECT descricao, categoria, valor, status
         FROM contas_previstas
-        WHERE id=?
+        WHERE id = ?
     """, (id_conta,)).fetchone()
 
     if not conta:
@@ -188,17 +286,12 @@ def pagar_conta(id_conta, banco, data_pagamento):
         conn.close()
         return False, "Essa conta já está paga."
 
-    # Permite pagar mesmo sem saldo suficiente
-    # O saldo do banco ficará negativo automaticamente,
-    # pois será registrado como despesa normalmente.
-
-    # 1. Cria o lançamento real
+    # Permite saldo negativo
     c.execute("""
         INSERT INTO lancamentos (data, descricao, tipo, categoria, banco, valor)
         VALUES (?, ?, 'Despesa', ?, ?, ?)
     """, (data_pagamento, f"PAGTO: {desc}", cat, banco, valor))
 
-    # 2. Marca a conta como paga
     c.execute("""
         UPDATE contas_previstas
         SET status='Pago',
@@ -209,35 +302,271 @@ def pagar_conta(id_conta, banco, data_pagamento):
 
     conn.commit()
     conn.close()
-
     return True, f"Conta paga com sucesso usando {banco}."
 
+def desfazer_pagamento(id_conta):
+    conn = get_conn()
+    c = conn.cursor()
+
+    conta = c.execute("""
+        SELECT descricao, categoria, valor, status, banco_pagamento, data_pagamento
+        FROM contas_previstas
+        WHERE id=?
+    """, (id_conta,)).fetchone()
+
+    if not conta:
+        conn.close()
+        return False, "Conta não encontrada."
+
+    desc, cat, valor, status, banco_pagamento, data_pagamento = conta
+
+    if status != "Pago":
+        conn.close()
+        return False, "Essa conta não está paga."
+
+    # remove um lançamento compatível (o mais recente)
+    lanc = c.execute("""
+        SELECT id FROM lancamentos
+        WHERE descricao = ?
+          AND tipo = 'Despesa'
+          AND categoria = ?
+          AND banco = ?
+          AND valor = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (f"PAGTO: {desc}", cat, banco_pagamento, valor)).fetchone()
+
+    if lanc:
+        c.execute("DELETE FROM lancamentos WHERE id = ?", (lanc[0],))
+
+    c.execute("""
+        UPDATE contas_previstas
+        SET status='Pendente',
+            banco_pagamento=NULL,
+            data_pagamento=NULL
+        WHERE id=?
+    """, (id_conta,))
+
+    conn.commit()
+    conn.close()
+    return True, "Pagamento desfeito com sucesso."
+
+def excluir_conta(id_conta):
+    conn = get_conn()
+    c = conn.cursor()
+
+    conta = c.execute("""
+        SELECT descricao, categoria, valor, status, banco_pagamento
+        FROM contas_previstas
+        WHERE id=?
+    """, (id_conta,)).fetchone()
+
+    if not conta:
+        conn.close()
+        return False, "Conta não encontrada."
+
+    desc, cat, valor, status, banco_pagamento = conta
+
+    # se estiver paga, remove um lançamento correspondente
+    if status == "Pago" and banco_pagamento:
+        lanc = c.execute("""
+            SELECT id FROM lancamentos
+            WHERE descricao = ?
+              AND tipo = 'Despesa'
+              AND categoria = ?
+              AND banco = ?
+              AND valor = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (f"PAGTO: {desc}", cat, banco_pagamento, valor)).fetchone()
+
+        if lanc:
+            c.execute("DELETE FROM lancamentos WHERE id = ?", (lanc[0],))
+
+    c.execute("DELETE FROM contas_previstas WHERE id = ?", (id_conta,))
+    conn.commit()
+    conn.close()
+    return True, "Conta excluída com sucesso."
+
+def atualizar_conta_prevista(
+    id_conta, descricao, categoria, valor, data_vencimento,
+    status, banco_pagamento=None, data_pagamento=None
+):
+    conn = get_conn()
+    c = conn.cursor()
+
+    # busca estado anterior
+    antiga = c.execute("""
+        SELECT descricao, categoria, valor, status, banco_pagamento
+        FROM contas_previstas
+        WHERE id=?
+    """, (id_conta,)).fetchone()
+
+    if not antiga:
+        conn.close()
+        return False, "Conta não encontrada."
+
+    desc_ant, cat_ant, val_ant, status_ant, banco_ant = antiga
+
+    # Se estava paga, remove lançamento antigo antes de atualizar
+    if status_ant == "Pago" and banco_ant:
+        lanc = c.execute("""
+            SELECT id FROM lancamentos
+            WHERE descricao = ?
+              AND tipo = 'Despesa'
+              AND categoria = ?
+              AND banco = ?
+              AND valor = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (f"PAGTO: {desc_ant}", cat_ant, banco_ant, val_ant)).fetchone()
+
+        if lanc:
+            c.execute("DELETE FROM lancamentos WHERE id = ?", (lanc[0],))
+
+    # atualiza conta
+    c.execute("""
+        UPDATE contas_previstas
+        SET descricao=?,
+            categoria=?,
+            valor=?,
+            data_vencimento=?,
+            status=?,
+            banco_pagamento=?,
+            data_pagamento=?
+        WHERE id=?
+    """, (
+        descricao, categoria, valor, data_vencimento,
+        status, banco_pagamento, data_pagamento, id_conta
+    ))
+
+    # Se após edição estiver paga, recria lançamento
+    if status == "Pago" and banco_pagamento and data_pagamento:
+        c.execute("""
+            INSERT INTO lancamentos (data, descricao, tipo, categoria, banco, valor)
+            VALUES (?, ?, 'Despesa', ?, ?, ?)
+        """, (data_pagamento, f"PAGTO: {descricao}", categoria, banco_pagamento, valor))
+
+    conn.commit()
+    conn.close()
+    return True, "Conta atualizada com sucesso."
+
+def excluir_conta_fixa(id_fixa):
+    conn = get_conn()
+    c = conn.cursor()
+
+    # remove apenas o modelo fixo (não apaga as contas já geradas)
+    c.execute("DELETE FROM contas_fixas WHERE id = ?", (id_fixa,))
+    conn.commit()
+    conn.close()
+    return True, "Conta fixa removida. As contas já geradas permanecem."
+
+def atualizar_conta_fixa(id_fixa, descricao, categoria, valor, dia_vencimento, data_inicio, ativa):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        UPDATE contas_fixas
+        SET descricao=?,
+            categoria=?,
+            valor=?,
+            dia_vencimento=?,
+            data_inicio=?,
+            ativa=?
+        WHERE id=?
+    """, (descricao, categoria, valor, dia_vencimento, data_inicio, ativa, id_fixa))
+    conn.commit()
+    conn.close()
+    return True, "Conta fixa atualizada com sucesso."
+
 # =========================================================
-# INTERFACE
+# UI COMPONENTS
+# =========================================================
+def render_saldos(df_lan):
+    st.subheader("🏦 Saldo por Banco")
+    saldos = calcular_saldos(df_lan)
+    cols = st.columns(len(BANCOS))
+
+    for i, banco in enumerate(BANCOS):
+        saldo = saldos[banco]
+        if saldo > 0:
+            classe = "saldo-positivo"
+        elif saldo < 0:
+            classe = "saldo-negativo"
+        else:
+            classe = "saldo-neutro"
+
+        cols[i].markdown(f"""
+        <div class="{classe}">
+            <div style="font-size:0.9rem;">{banco}</div>
+            <div style="font-size:1.1rem;">{format_brl(saldo)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+def render_card_conta(row):
+    status_visual = status_conta(row["data_vencimento"], row["status"])
+
+    if status_visual == "Pago":
+        classe = "status-pago"
+    elif status_visual == "Atrasado":
+        classe = "status-atrasado"
+    else:
+        classe = "status-pendente"
+
+    origem = row["origem"] if pd.notna(row["origem"]) else "Manual"
+    origem_classe = "origem-fixa" if origem == "Fixa" else "origem-manual"
+
+    st.markdown(f"""
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <div><b>{row['descricao']}</b></div>
+                <div class="small-text">
+                    Categoria: {row['categoria']}<br>
+                    Vencimento: {row['data_vencimento']}<br>
+                    Origem: <span class="{origem_classe}">{origem}</span>
+                </div>
+            </div>
+            <div style="text-align:right;">
+                <div class="{classe}">{format_brl(row['valor'])}</div>
+                <div class="{classe}">{status_visual}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# =========================================================
+# APP
 # =========================================================
 def main():
     init_db()
-    st.title("💸 Gestão Financeira Pessoal")
+    gerar_contas_fixas_automaticamente()
+
+    st.title("💸 Gestão Financeira Pessoal — V6 Completa")
 
     # -----------------------------------------------------
-    # CARREGAMENTO DE DADOS
+    # CARREGAR DADOS
     # -----------------------------------------------------
     df_lan = db_fetch_df("SELECT * FROM lancamentos ORDER BY data DESC, id DESC")
     df_prev = db_fetch_df("SELECT * FROM contas_previstas ORDER BY data_vencimento ASC, id ASC")
+    df_fixas = db_fetch_df("SELECT * FROM contas_fixas ORDER BY descricao ASC")
     df_orc = db_fetch_df("SELECT * FROM orcamentos")
 
-    # Garantia para DataFrames vazios
     if df_lan.empty:
         df_lan = pd.DataFrame(columns=["id", "data", "descricao", "tipo", "categoria", "banco", "valor"])
 
     if df_prev.empty:
         df_prev = pd.DataFrame(columns=[
-            "id", "descricao", "categoria", "valor", "data_vencimento",
-            "status", "banco_pagamento", "data_pagamento"
+            "id", "descricao", "categoria", "valor", "data_vencimento", "status",
+            "banco_pagamento", "data_pagamento", "origem", "fixa_id"
+        ])
+
+    if df_fixas.empty:
+        df_fixas = pd.DataFrame(columns=[
+            "id", "descricao", "categoria", "valor", "dia_vencimento", "data_inicio", "ativa"
         ])
 
     # -----------------------------------------------------
-    # RESUMO GERAL
+    # RESUMO
     # -----------------------------------------------------
     saldo_atual = (
         df_lan[df_lan["tipo"] == "Receita"]["valor"].sum()
@@ -253,38 +582,21 @@ def main():
     c2.metric("Contas Pendentes", format_brl(dividas_aberto), delta_color="inverse")
     c3.metric("Saldo Projetado", format_brl(saldo_projetado))
 
-    # -----------------------------------------------------
-    # SALDO POR BANCO
-    # -----------------------------------------------------
-    st.subheader("🏦 Saldo por Banco")
-    saldos = calcular_saldos(df_lan)
-    cols_bancos = st.columns(len(BANCOS))
-
-    for i, banco in enumerate(BANCOS):
-        saldo = saldos[banco]
-        if saldo > 0:
-            classe = "saldo-positivo"
-        elif saldo < 0:
-            classe = "saldo-negativo"
-        else:
-            classe = "saldo-neutro"
-
-        cols_bancos[i].markdown(f"""
-        <div class="{classe}">
-            <div style="font-size: 0.9rem;">{banco}</div>
-            <div style="font-size: 1.1rem;">{format_brl(saldo)}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+    render_saldos(df_lan)
     st.divider()
 
     # -----------------------------------------------------
-    # AÇÕES: NOVO LANÇAMENTO / CONTA / TRANSFERÊNCIA
+    # NOVOS CADASTROS
     # -----------------------------------------------------
-    with st.expander("➕ Novo Lançamento / Conta / Transferência", expanded=False):
-        t1, t2, t3 = st.tabs(["💰 Receita Real", "📝 Conta a Pagar", "📲 Transferência"])
+    with st.expander("➕ Novo Lançamento / Conta / Conta Fixa / Transferência", expanded=False):
+        t1, t2, t3, t4 = st.tabs([
+            "💰 Receita Real",
+            "📝 Conta Avulsa",
+            "🔁 Conta Fixa",
+            "📲 Transferência"
+        ])
 
-        # ---------------- Receita ----------------
+        # Receita
         with t1:
             with st.form("f_rec", clear_on_submit=True):
                 col_a, col_b = st.columns(2)
@@ -295,7 +607,7 @@ def main():
 
                 if st.form_submit_button("Registrar Entrada"):
                     if not desc.strip():
-                        st.warning("Informe uma descrição para a receita.")
+                        st.warning("Informe uma descrição.")
                     elif val <= 0:
                         st.warning("Informe um valor maior que zero.")
                     else:
@@ -303,22 +615,22 @@ def main():
                             INSERT INTO lancamentos (data, descricao, tipo, categoria, banco, valor)
                             VALUES (?, ?, 'Receita', ?, ?, ?)
                         """, (dat.isoformat(), desc.strip(), "Salário", ban, val))
-                        st.success("Receita registrada com sucesso!")
+                        st.success("Receita registrada!")
                         st.rerun()
 
-        # ---------------- Conta a pagar ----------------
+        # Conta avulsa
         with t2:
             with st.form("f_prev", clear_on_submit=True):
                 col_a, col_b = st.columns(2)
                 venc = col_a.date_input("Vencimento", date.today())
                 val_p = col_b.number_input("Valor R$", min_value=0.0, step=0.01, key="v_p")
-                desc_p = st.text_input("Descrição da conta (Ex: Aluguel, Internet)")
-                cat_p = st.selectbox("Categoria", CATEGORIAS)
-                recorr = st.checkbox("É recorrente? (Lançar para 12 meses)")
+                desc_p = st.text_input("Descrição da conta")
+                cat_p = st.selectbox("Categoria", CATEGORIAS, key="cat_avulsa")
+                recorr = st.checkbox("Gerar 12 meses (recorrência manual)")
 
-                if st.form_submit_button("Agendar Conta"):
+                if st.form_submit_button("Salvar Conta Avulsa"):
                     if not desc_p.strip():
-                        st.warning("Informe a descrição da conta.")
+                        st.warning("Informe a descrição.")
                     elif val_p <= 0:
                         st.warning("Informe um valor maior que zero.")
                     else:
@@ -327,14 +639,46 @@ def main():
                             data_v = (venc + relativedelta(months=i)).isoformat()
                             sufixo = f" ({i+1}/{meses})" if recorr else ""
                             db_execute("""
-                                INSERT INTO contas_previstas (descricao, categoria, valor, data_vencimento)
-                                VALUES (?, ?, ?, ?)
+                                INSERT INTO contas_previstas (
+                                    descricao, categoria, valor, data_vencimento, origem
+                                )
+                                VALUES (?, ?, ?, ?, 'Manual')
                             """, (f"{desc_p.strip()}{sufixo}", cat_p, val_p, data_v))
-                        st.success("Conta(s) agendada(s) com sucesso!")
+                        st.success("Conta(s) salva(s)!")
                         st.rerun()
 
-        # ---------------- Transferência ----------------
+        # Conta fixa
         with t3:
+            with st.form("f_fixa", clear_on_submit=True):
+                desc_f = st.text_input("Descrição da conta fixa")
+                col_f1, col_f2, col_f3 = st.columns(3)
+                cat_f = col_f1.selectbox("Categoria", CATEGORIAS, key="cat_fixa")
+                val_f = col_f2.number_input("Valor R$", min_value=0.0, step=0.01, key="val_fixa")
+                dia_f = col_f3.number_input("Dia vencimento", min_value=1, max_value=31, step=1, value=10)
+
+                data_inicio_f = st.date_input("Início da recorrência", date.today().replace(day=1))
+                ativa_f = st.checkbox("Ativa", value=True)
+
+                if st.form_submit_button("Salvar Conta Fixa"):
+                    if not desc_f.strip():
+                        st.warning("Informe a descrição.")
+                    elif val_f <= 0:
+                        st.warning("Informe um valor maior que zero.")
+                    else:
+                        db_execute("""
+                            INSERT INTO contas_fixas (
+                                descricao, categoria, valor, dia_vencimento, data_inicio, ativa
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (
+                            desc_f.strip(), cat_f, val_f, int(dia_f),
+                            data_inicio_f.isoformat(), 1 if ativa_f else 0
+                        ))
+                        st.success("Conta fixa salva!")
+                        st.rerun()
+
+        # Transferência
+        with t4:
             with st.form("f_trf", clear_on_submit=True):
                 v_trf = st.number_input("Valor da transferência", min_value=0.0, step=0.01)
                 o = st.selectbox("Origem", BANCOS, key="origem_trf")
@@ -346,7 +690,6 @@ def main():
                     else:
                         dt = date.today().isoformat()
 
-                        # Permite saldo negativo na origem
                         db_execute("""
                             INSERT INTO lancamentos (data, descricao, tipo, categoria, banco, valor)
                             VALUES (?, ?, 'Despesa', 'Transferência', ?, ?)
@@ -357,13 +700,13 @@ def main():
                             VALUES (?, ?, 'Receita', 'Transferência', ?, ?)
                         """, (dt, f"TRF de {o}", d, v_trf))
 
-                        st.success("Transferência realizada com sucesso!")
+                        st.success("Transferência realizada!")
                         st.rerun()
 
     st.divider()
 
     # -----------------------------------------------------
-    # FILTRO MENSAL DAS CONTAS
+    # CONTAS DO MÊS
     # -----------------------------------------------------
     st.subheader("🗓️ Lista de Contas do Mês")
 
@@ -388,7 +731,6 @@ def main():
         index=anos_disponiveis.index(hoje.year)
     )
 
-    # Filtra contas do mês/ano selecionados
     if not df_prev.empty:
         df_prev["data_vencimento_dt"] = pd.to_datetime(df_prev["data_vencimento"], errors="coerce")
         df_mes = df_prev[
@@ -403,70 +745,234 @@ def main():
     total_pendente_mes = df_mes[df_mes["status"] == "Pendente"]["valor"].sum() if not df_mes.empty else 0.0
     total_pago_mes = df_mes[df_mes["status"] == "Pago"]["valor"].sum() if not df_mes.empty else 0.0
 
-    c_mes1, c_mes2, c_mes3 = st.columns(3)
-    c_mes1.metric("Total de contas no mês", format_brl(total_mes))
-    c_mes2.metric("Pendente no mês", format_brl(total_pendente_mes))
-    c_mes3.metric("Pago no mês", format_brl(total_pago_mes))
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total do mês", format_brl(total_mes))
+    m2.metric("Pendente", format_brl(total_pendente_mes))
+    m3.metric("Pago", format_brl(total_pago_mes))
 
     if df_mes.empty:
         st.info("Nenhuma conta cadastrada para este mês.")
     else:
         for _, row in df_mes.iterrows():
-            status_visual = status_conta(row["data_vencimento"], row["status"])
+            render_card_conta(row)
 
-            if status_visual == "Pago":
-                classe = "status-pago"
-            elif status_visual == "Atrasado":
-                classe = "status-atrasado"
+            # AÇÕES RÁPIDAS
+            cA, cB, cC = st.columns([2, 1, 1])
+
+            # PAGAR / DESFAZER
+            if row["status"] == "Pendente":
+                banco_pagto = cA.selectbox(
+                    f"Banco para pagar - {row['descricao']}",
+                    BANCOS,
+                    key=f"banco_pagto_{row['id']}",
+                    label_visibility="collapsed"
+                )
+                if cB.button("✔ Pagar", key=f"btn_pagar_{row['id']}"):
+                    sucesso, msg = pagar_conta(row["id"], banco_pagto, date.today().isoformat())
+                    if sucesso:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
             else:
-                classe = "status-pendente"
+                banco_info = row["banco_pagamento"] if pd.notna(row["banco_pagamento"]) else "-"
+                data_info = row["data_pagamento"] if pd.notna(row["data_pagamento"]) else "-"
+                cA.caption(f"Pago em: {data_info} | Banco: {banco_info}")
 
-            with st.container():
-                st.markdown(f"""
-                <div class="card">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <div>
-                            <div><b>{row['descricao']}</b></div>
-                            <div class="small-text">
-                                Categoria: {row['categoria']}<br>
-                                Vencimento: {row['data_vencimento']}
-                            </div>
-                        </div>
-                        <div style="text-align:right;">
-                            <div class="{classe}">{format_brl(row['valor'])}</div>
-                            <div class="{classe}">{status_visual}</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                if cB.button("↩️ Desfazer", key=f"btn_desfazer_{row['id']}"):
+                    sucesso, msg = desfazer_pagamento(row["id"])
+                    if sucesso:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
-                # Se estiver pendente, permitir pagar escolhendo o banco
-                if row["status"] == "Pendente":
-                    col1, col2 = st.columns([3, 1])
-                    banco_pagto = col1.selectbox(
-                        f"Selecionar banco para pagar: {row['descricao']}",
-                        BANCOS,
-                        key=f"banco_pagto_{row['id']}",
-                        label_visibility="collapsed"
+            # EXCLUIR
+            if cC.button("🗑 Excluir", key=f"btn_excluir_{row['id']}"):
+                sucesso, msg = excluir_conta(row["id"])
+                if sucesso:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            # EDIÇÃO DA CONTA
+            with st.expander(f"✏️ Editar conta: {row['descricao']}", expanded=False):
+                with st.form(f"form_edit_conta_{row['id']}"):
+                    e1, e2 = st.columns(2)
+                    desc_e = e1.text_input("Descrição", value=row["descricao"], key=f"desc_{row['id']}")
+                    cat_e = e2.selectbox(
+                        "Categoria", CATEGORIAS,
+                        index=CATEGORIAS.index(row["categoria"]) if row["categoria"] in CATEGORIAS else 0,
+                        key=f"cat_{row['id']}"
                     )
-                    if col2.button("✔ Pagar", key=f"btn_pagar_{row['id']}"):
-                        sucesso, msg = pagar_conta(row["id"], banco_pagto, date.today().isoformat())
+
+                    e3, e4 = st.columns(2)
+                    val_e = e3.number_input(
+                        "Valor R$",
+                        min_value=0.0,
+                        step=0.01,
+                        value=float(row["valor"]),
+                        key=f"val_{row['id']}"
+                    )
+                    venc_e = e4.date_input(
+                        "Vencimento",
+                        value=pd.to_datetime(row["data_vencimento"]).date(),
+                        key=f"venc_{row['id']}"
+                    )
+
+                    status_opts = ["Pendente", "Pago"]
+                    status_atual = row["status"] if row["status"] in status_opts else "Pendente"
+
+                    e5, e6 = st.columns(2)
+                    status_e = e5.selectbox(
+                        "Status",
+                        status_opts,
+                        index=status_opts.index(status_atual),
+                        key=f"status_{row['id']}"
+                    )
+
+                    banco_atual = row["banco_pagamento"] if pd.notna(row["banco_pagamento"]) and row["banco_pagamento"] in BANCOS else BANCOS[0]
+                    banco_e = e6.selectbox(
+                        "Banco pagamento (se pago)",
+                        BANCOS,
+                        index=BANCOS.index(banco_atual),
+                        key=f"banco_edit_{row['id']}"
+                    )
+
+                    data_pagto_default = (
+                        pd.to_datetime(row["data_pagamento"]).date()
+                        if pd.notna(row["data_pagamento"])
+                        else date.today()
+                    )
+                    data_pagto_e = st.date_input(
+                        "Data pagamento (se pago)",
+                        value=data_pagto_default,
+                        key=f"data_pagto_{row['id']}"
+                    )
+
+                    if st.form_submit_button("Salvar alterações"):
+                        banco_final = banco_e if status_e == "Pago" else None
+                        data_final = data_pagto_e.isoformat() if status_e == "Pago" else None
+
+                        sucesso, msg = atualizar_conta_prevista(
+                            row["id"],
+                            desc_e.strip(),
+                            cat_e,
+                            val_e,
+                            venc_e.isoformat(),
+                            status_e,
+                            banco_final,
+                            data_final
+                        )
                         if sucesso:
                             st.success(msg)
                             st.rerun()
                         else:
                             st.error(msg)
 
-                # Se já estiver paga, mostrar banco/data
-                else:
-                    banco_info = row["banco_pagamento"] if pd.notna(row["banco_pagamento"]) else "-"
-                    data_info = row["data_pagamento"] if pd.notna(row["data_pagamento"]) else "-"
-                    st.caption(f"Pago em: {data_info} | Banco: {banco_info}")
-
-    st.divider()
+            st.markdown("---")
 
     # -----------------------------------------------------
-    # PRÓXIMAS CONTAS (FUTURAS)
+    # CONTAS FIXAS (MODELOS) - TODAS EDITÁVEIS
+    # -----------------------------------------------------
+    st.subheader("🔁 Contas Fixas (Modelos)")
+    st.caption("As contas fixas geram automaticamente contas mensais. O modelo e as contas geradas são editáveis.")
+
+    if df_fixas.empty:
+        st.info("Nenhuma conta fixa cadastrada.")
+    else:
+        for _, fixa in df_fixas.iterrows():
+            ativa_txt = "Ativa" if int(fixa["ativa"]) == 1 else "Inativa"
+
+            st.markdown(f"""
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <div><b>{fixa['descricao']}</b></div>
+                        <div class="small-text">
+                            Categoria: {fixa['categoria']}<br>
+                            Valor padrão: {format_brl(fixa['valor'])}<br>
+                            Dia vencimento: {int(fixa['dia_vencimento'])}<br>
+                            Início: {fixa['data_inicio']}
+                        </div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div class="origem-fixa">{ativa_txt}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            cfx1, cfx2 = st.columns([3, 1])
+            with cfx1.expander(f"✏️ Editar conta fixa: {fixa['descricao']}", expanded=False):
+                with st.form(f"form_edit_fixa_{fixa['id']}"):
+                    fx1, fx2 = st.columns(2)
+                    desc_fx = fx1.text_input("Descrição", value=fixa["descricao"], key=f"desc_fx_{fixa['id']}")
+                    cat_fx = fx2.selectbox(
+                        "Categoria",
+                        CATEGORIAS,
+                        index=CATEGORIAS.index(fixa["categoria"]) if fixa["categoria"] in CATEGORIAS else 0,
+                        key=f"cat_fx_{fixa['id']}"
+                    )
+
+                    fx3, fx4 = st.columns(2)
+                    val_fx = fx3.number_input(
+                        "Valor padrão R$",
+                        min_value=0.0,
+                        step=0.01,
+                        value=float(fixa["valor"]),
+                        key=f"val_fx_{fixa['id']}"
+                    )
+                    dia_fx = fx4.number_input(
+                        "Dia vencimento",
+                        min_value=1,
+                        max_value=31,
+                        step=1,
+                        value=int(fixa["dia_vencimento"]),
+                        key=f"dia_fx_{fixa['id']}"
+                    )
+
+                    data_inicio_fx = st.date_input(
+                        "Data início",
+                        value=pd.to_datetime(fixa["data_inicio"]).date(),
+                        key=f"inicio_fx_{fixa['id']}"
+                    )
+
+                    ativa_fx = st.checkbox(
+                        "Ativa",
+                        value=(int(fixa["ativa"]) == 1),
+                        key=f"ativa_fx_{fixa['id']}"
+                    )
+
+                    if st.form_submit_button("Salvar conta fixa"):
+                        sucesso, msg = atualizar_conta_fixa(
+                            fixa["id"],
+                            desc_fx.strip(),
+                            cat_fx,
+                            val_fx,
+                            int(dia_fx),
+                            data_inicio_fx.isoformat(),
+                            1 if ativa_fx else 0
+                        )
+                        if sucesso:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            if cfx2.button("🗑 Excluir fixa", key=f"del_fixa_{fixa['id']}"):
+                sucesso, msg = excluir_conta_fixa(fixa["id"])
+                if sucesso:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            st.markdown("---")
+
+    # -----------------------------------------------------
+    # PRÓXIMAS CONTAS
     # -----------------------------------------------------
     with st.expander("📅 Próximas Contas (futuras pendentes)"):
         if not df_prev.empty:
@@ -482,8 +988,10 @@ def main():
         if df_futuras.empty:
             st.info("Nenhuma conta futura pendente.")
         else:
+            mostrar_fut = df_futuras.copy()
+            mostrar_fut["valor"] = mostrar_fut["valor"].apply(format_brl)
             st.dataframe(
-                df_futuras[["descricao", "categoria", "valor", "data_vencimento", "status"]],
+                mostrar_fut[["descricao", "categoria", "valor", "data_vencimento", "status", "origem"]],
                 use_container_width=True
             )
 
@@ -541,7 +1049,7 @@ def main():
     # HISTÓRICO DE CONTAS
     # -----------------------------------------------------
     st.divider()
-    with st.expander("🧾 Histórico de Contas Cadastradas"):
+    with st.expander("🧾 Histórico Completo de Contas"):
         if df_prev.empty:
             st.info("Nenhuma conta cadastrada.")
         else:
@@ -550,7 +1058,7 @@ def main():
             st.dataframe(
                 mostrar[[
                     "descricao", "categoria", "valor", "data_vencimento",
-                    "status", "banco_pagamento", "data_pagamento"
+                    "status", "banco_pagamento", "data_pagamento", "origem", "fixa_id"
                 ]].sort_values(by=["data_vencimento"], ascending=False),
                 use_container_width=True
             )
