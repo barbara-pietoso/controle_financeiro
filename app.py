@@ -1046,12 +1046,15 @@ def main():
     # -----------------------------------------------------
     # ORÇAMENTO
     # -----------------------------------------------------
+    # -----------------------------------------------------
+
     st.subheader("📊 Orçamento vs Realizado (mês atual)")
+    
     with st.expander("Configurar Metas por Categoria"):
         c1, c2 = st.columns(2)
         cat_meta = c1.selectbox("Categoria", CATEGORIAS, key="cat_meta")
         val_meta = c2.number_input("Meta Mensal R$", min_value=0.0, step=0.01)
-
+    
         if st.button("Salvar Meta"):
             db_execute("""
                 INSERT OR REPLACE INTO orcamentos (categoria, meta)
@@ -1059,36 +1062,74 @@ def main():
             """, (cat_meta, val_meta))
             st.success("Meta salva.")
             st.rerun()
-
+    
     df_orc = query_df("SELECT * FROM orcamentos")
+    
     inicio_mes = month_start().isoformat()
     fim_mes = month_end().isoformat()
-
-    df_gastos_mes = query_df("""
-        SELECT categoria, valor
+    competencia_mes = month_start().strftime("%Y-%m")
+    
+    # -----------------------------------------------------
+    # 1️⃣ DESPESAS REAIS (EXCLUINDO CARTÃO E TRANSFERÊNCIA)
+    # -----------------------------------------------------
+    df_despesas_reais = query_df("""
+        SELECT categoria, SUM(valor) as total
         FROM lancamentos
         WHERE tipo='Despesa'
-          AND categoria NOT IN ('Transferência')
+          AND categoria NOT IN ('Transferência', 'Cartão de Crédito')
           AND data >= ?
           AND data <= ?
+        GROUP BY categoria
     """, (inicio_mes, fim_mes))
-
+    
+    # -----------------------------------------------------
+    # 2️⃣ PARCELAS DO CARTÃO NO MÊS
+    # -----------------------------------------------------
+    df_cartao = query_df("""
+        SELECT cc.categoria, SUM(p.valor_parcela) as total
+        FROM parcelas_cartao p
+        JOIN compras_cartao cc ON cc.id = p.compra_id
+        WHERE p.competencia_fatura = ?
+        GROUP BY cc.categoria
+    """, (competencia_mes,))
+    
+    # -----------------------------------------------------
+    # COMBINAR OS DOIS
+    # -----------------------------------------------------
+    gastos_categoria = {}
+    
+    if not df_despesas_reais.empty:
+        for _, row in df_despesas_reais.iterrows():
+            gastos_categoria[row["categoria"]] = float(row["total"])
+    
+    if not df_cartao.empty:
+        for _, row in df_cartao.iterrows():
+            cat = row["categoria"]
+            gastos_categoria[cat] = gastos_categoria.get(cat, 0) + float(row["total"])
+    
+    # -----------------------------------------------------
+    # MOSTRAR ORÇAMENTO
+    # -----------------------------------------------------
     if df_orc.empty:
         st.info("Nenhuma meta cadastrada.")
     else:
         for _, m in df_orc.iterrows():
-            realizado = 0.0
-            if not df_gastos_mes.empty:
-                realizado = df_gastos_mes[df_gastos_mes["categoria"] == m["categoria"]]["valor"].sum()
+    
+            categoria = m["categoria"]
             meta = safe_float(m["meta"])
+            realizado = gastos_categoria.get(categoria, 0)
+    
             progresso = min(realizado / meta, 1.0) if meta > 0 else 0
-
-            st.write(f"**{m['categoria']}**")
-            c1, c2 = st.columns([4, 1])
+    
+            st.write(f"**{categoria}**")
+    
+            c1, c2 = st.columns([4,1])
             c1.progress(progresso)
-            c2.write(f"{format_brl(realizado)} / {format_brl(meta)}")
-
-    st.divider()
+    
+            if realizado > meta and meta > 0:
+                c2.write(f"⚠️ {format_brl(realizado)} / {format_brl(meta)}")
+            else:
+                c2.write(f"{format_brl(realizado)} / {format_brl(meta)}")
 
     # -----------------------------------------------------
     # SALDO POR BANCO
